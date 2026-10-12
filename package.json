@@ -1,0 +1,18 @@
+{
+  "name": "vorratskammer",
+  "version": "1.0.0",
+  "description": "Vorratskammer: gemeinsamer Bestand f\u00fcr Keller und Au\u00dfenlager",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && npx --yes serve dist"
+  },
+  "dependencies": {
+    "barcode-detector": "^3.2.2",
+    "firebase": "^12.19.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "private": true,
+  "type": "module"
+}

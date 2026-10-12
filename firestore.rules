@@ -1,0 +1,11 @@
+rules_version = '2';
+// Nur euer gemeinsamer Login darf den Vorrat lesen und ändern.
+// ERSETZEN: die E-Mail-Adresse unten durch euren Login aus Firebase → Authentication.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /items/{itemId} {
+      allow read, write: if request.auth != null
+        && request.auth.token.email == "EURE-EMAIL@BEISPIEL.DE";
+    }
+  }
+}
