@@ -22,6 +22,7 @@ const state = {
   scanDir: "in",
   collapsed: new Set(ui.collapsed || []),
   hideEmpty: ui.hideEmpty !== false,
+  showFill: ui.showFill !== false,
 };
 
 // ---------- helpers ----------
@@ -41,7 +42,7 @@ const isFill = it => it.pack.mode === "fill";
 
 function loadUi() { try { return JSON.parse(localStorage.getItem("vk-ui") || "{}"); } catch { return {}; } }
 function saveUi() {
-  try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc, collapsed: [...state.collapsed], hideEmpty: state.hideEmpty })); } catch {}
+  try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc, collapsed: [...state.collapsed], hideEmpty: state.hideEmpty, showFill: state.showFill })); } catch {}
 }
 
 // Items whose names share most words with `name`: used to stop duplicates.
@@ -98,7 +99,7 @@ function pillsHtml(it, loc) {
 }
 function whereHtml(it) {
   return LOCS.filter(l => inStock(it, l)).map(l =>
-    `<span class="where ${l}"><i></i>${LOC_SHORT[l]} <b>${units(it, l)}</b>${pillsHtml(it, l)}</span>`).join("");
+    `<span class="where ${l}"><i></i>${LOC_SHORT[l]} <b>${units(it, l)}</b>${state.showFill ? pillsHtml(it, l) : ""}</span>`).join("");
 }
 function bottleHtml(v) {
   return `<span class="bottle" aria-hidden="true"><span style="height:${Math.round(v * 100)}%"></span></span>`;
@@ -476,7 +477,9 @@ function renderShell() {
           <button data-view="keller">Keller<span class="n" id="n-keller"></span></button>
           <button data-view="aussen">Außenlager<span class="n" id="n-aussen"></span></button>
         </div>
-        <div class="viewopts"><button class="toggle" id="hide"><span class="sw" aria-hidden="true"></span>Leere ausblenden</button></div>
+        <div class="viewopts">
+          <button class="toggle" id="fill"><span class="sw" aria-hidden="true"></span>Füllstandsanzeige</button>
+          <button class="toggle" id="hide"><span class="sw" aria-hidden="true"></span>Leere ausblenden</button></div>
       </header>
       <ul class="list" id="list"></ul>
       <div id="empty"></div>
@@ -500,6 +503,7 @@ function renderShell() {
   $("#scan").onclick = () => { unlockAudio(); openScanner(); };
   $("#status").onclick = statusSheet;
   $("#hide").onclick = () => { state.hideEmpty = !state.hideEmpty; saveUi(); renderList(); };
+  $("#fill").onclick = () => { state.showFill = !state.showFill; saveUi(); renderList(); };
 
   const list = $("#list");
   list.addEventListener("click", e => {
@@ -529,7 +533,6 @@ function renderShell() {
     bump(it, state.view, n - units(it, state.view)); renderList();
   });
   $("#empty").addEventListener("click", e => {
-    if (e.target.closest("#show-empty")) { state.hideEmpty = false; saveUi(); renderList(); return; }
     if (e.target.closest("#add-q")) newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
   });
   window.addEventListener("online", () => { state.online = true; renderStatus(); });
@@ -583,7 +586,7 @@ function rowHtml(it) {
       <div class="total ${n ? "" : "out"}">${n || "leer"}</div></li>`;
   }
   // The number is all units here; + and − change the full / closed ones.
-  const davon = davonHtml(it, loc);
+  const davon = state.showFill ? davonHtml(it, loc) : "";
   return `<li class="${cls}" data-id="${it.id}">
     <button class="txt"><span class="name">${esc(it.name)}</span>${davon ? `<span class="sub">${davon}</span>` : ""}</button>
     ${stepperHtml("", units(it, loc))}</li>`;
@@ -595,6 +598,7 @@ function renderList() {
   for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l)).length || "";
   $("#qclear").hidden = !state.query;
   $("#hide").setAttribute("aria-pressed", state.hideEmpty);
+  $("#fill").setAttribute("aria-pressed", state.showFill);
 
   const { list, hidden } = visibleItems();
   // Group by Rubrik: Ohne Rubrik first (so it gets sorted), then Food, then Non-Food.
@@ -621,7 +625,6 @@ function renderList() {
   }
   $("#list").innerHTML = html;
 
-  const hiddenNote = hidden ? `<div class="hiddennote">${hidden} leere${hidden === 1 ? "r" : ""} Artikel ausgeblendet. <button class="linkbtn" id="show-empty">Anzeigen</button></div>` : "";
   let empty = "";
   if (state.loadError) empty = `<div class="empty"><strong>Da stimmt etwas nicht.</strong><span>${esc(state.loadError)}</span></div>`;
   else if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
@@ -630,11 +633,11 @@ function renderList() {
       <span>Also ab auf die Einkaufsliste. Oder doch da? Dann leg es an.</span>
       <button class="btn ghost small" id="add-q">„${esc(state.query)}“ anlegen</button></div>`;
   } else if (!list.length && hidden) {
-    empty = `<div class="empty"><strong>${state.view === "alle" ? "Gerade ist nichts da." : "Im " + LOC_NAME[state.view] + " ist gerade nichts."}</strong>${hiddenNote}</div>`;
+    empty = `<div class="empty"><strong>${state.view === "alle" ? "Gerade ist nichts da." : "Im " + LOC_NAME[state.view] + " ist gerade nichts."}</strong><span>Leere Artikel sind ausgeblendet.</span></div>`;
   } else if (!list.length) {
     empty = `<div class="empty"><strong>${state.view === "alle" ? "Noch nichts erfasst." : "Im " + LOC_NAME[state.view] + " ist noch nichts erfasst."}</strong>
       <span>Tippe auf „Scannen“ und halte die Kamera auf einen Barcode. Oder lege einen Artikel mit „Neu“ von Hand an.</span></div>`;
-  } else empty = hiddenNote;
+  }
   $("#empty").innerHTML = empty;
 }
 
