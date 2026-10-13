@@ -65,7 +65,19 @@ function toast(msg, undo) {
   if (undo) el.querySelector("button").onclick = () => { undo(); el.innerHTML = ""; };
   toastTimer = setTimeout(() => (el.innerHTML = ""), 4500);
 }
-onWriteError(() => toast("Speichern hat nicht geklappt. Bitte nochmal versuchen."));
+// Plain-language reason for a Firebase error, with the code for troubleshooting.
+function errText(e, what) {
+  const code = String(e?.code || "").replace(/^firestore\//, "");
+  const why = {
+    "permission-denied": "Keine Berechtigung. Bitte die Firestore-Regeln prüfen (E-Mail kleingeschrieben, veröffentlicht?).",
+    "not-found": "Die Datenbank wurde nicht gefunden. Wurde unter Firestore eine Datenbank erstellt?",
+    "failed-precondition": "Die Datenbank ist noch nicht bereit. Wurde unter Firestore eine Datenbank erstellt?",
+    "unauthenticated": "Nicht angemeldet. Bitte ab- und wieder anmelden.",
+    "unavailable": "Keine Verbindung zur Datenbank.",
+  }[code] || "Bitte nochmal versuchen.";
+  return `${what} ${why}${code ? ` (${code})` : ""}`;
+}
+onWriteError(e => toast(errText(e, "Speichern hat nicht geklappt.")));
 
 // ---------- sheets ----------
 function openSheet(html, onClose) {
@@ -324,7 +336,8 @@ function renderList() {
   }).join("");
 
   let empty = "";
-  if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
+  if (state.loadError) empty = `<div class="empty"><strong>Da stimmt etwas nicht.</strong><span>${esc(state.loadError)}</span></div>`;
+  else if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
   else if (!list.length && state.query) {
     empty = `<div class="empty"><strong>„${esc(state.query)}“ haben wir ${state.view === "alle" ? "nicht" : "nicht im " + LOC_NAME[state.view]}.</strong>
       <span>Also ab auf die Einkaufsliste. Oder doch da? Dann leg es an.</span>
@@ -493,7 +506,12 @@ let unsubItems = null;
 function startMain() {
   renderShell(); renderStatus(); renderList();
   unsubItems = store.subscribe((items, meta) => {
-    if (!items) { toast("Daten konnten nicht geladen werden. Bitte App neu öffnen."); return; }
+    if (!items) {
+      state.loadError = errText(meta.error, "Der Vorrat konnte nicht geladen werden.");
+      renderList();
+      return;
+    }
+    state.loadError = null;
     state.items = items; state.loaded = true; state.pending = !!meta.pending;
     renderStatus();
     // Don't redraw the list under a finger that is typing a number.
