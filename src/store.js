@@ -14,7 +14,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc,
-  increment, arrayUnion, serverTimestamp,
+  increment, arrayUnion, serverTimestamp, runTransaction,
 } from "firebase/firestore";
 
 export const LOCS = ["keller", "aussen"];
@@ -87,6 +87,28 @@ export class FirebaseStore {
     updateDoc(doc(this.col, id), { [loc]: increment(delta), locs: arrayUnion(loc), updatedAt: serverTimestamp() }).catch(reportWriteError);
   }
   remove(id) { deleteDoc(doc(this.col, id)).catch(reportWriteError); }
+  // Opened bottles marked "voll" become unopened ones. A transaction, so two phones can't both do it.
+  settleFull(id) {
+    const ref = doc(this.col, id);
+    return runTransaction(this.db, async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return;
+      const patch = fullToClosed(snap.data());
+      if (patch) tx.update(ref, { ...patch, updatedAt: serverTimestamp() });
+    });
+  }
+}
+
+function fullToClosed(d) {
+  const opened = Array.isArray(d.opened) ? d.opened : d.open ? [d.open] : [];
+  const full = opened.filter(o => Number(o.left) >= 1);
+  if (!full.length) return null;
+  const patch = { opened: opened.filter(o => Number(o.left) < 1), open: null };
+  for (const l of LOCS) {
+    const n = full.filter(o => o.loc === l).length;
+    if (n) patch[l] = Math.max(0, Number(d[l]) || 0) + n;
+  }
+  return patch;
 }
 
 
@@ -143,4 +165,8 @@ export class LocalStore {
     this.emit();
   }
   remove(id) { this.items.delete(id); this.emit(); }
+  async settleFull(id) {
+    const it = this.items.get(id); const patch = it && fullToClosed(it);
+    if (patch) { delete patch.open; Object.assign(it, patch); this.emit(); }
+  }
 }

@@ -63,7 +63,8 @@ function similar(name, exceptId) {
     .map(x => x.it);
 }
 
-const FILL_STEPS = [0.25, 0.5, 0.75, 1];
+// Opened bottles are never "voll": unopened ones are the full ones.
+const FILL_STEPS = [0.25, 0.5, 0.75];
 const FRAC = { 0.25: "¼", 0.5: "½", 0.75: "¾" };
 function fillShort(v) { return v >= 1 ? "voll" : FRAC[v] || "¼"; }
 // 3.5 -> "3½", 0.25 -> "¼"
@@ -79,6 +80,13 @@ function packNoun(it, n) {
 const unitNoun = (it, n) => packNoun(it, n) || "Stück";
 
 // Small badges for the opened packs or bottles at a place, emptiest first.
+// "davon 4× voll ¼ ½" for a place with opened ones; empty when all are closed.
+function davonHtml(it, loc) {
+  const pills = pillsHtml(it, loc);
+  if (!pills) return "";
+  const closed = it[loc] ? `<span class="pill full">${it[loc]}× ${isFill(it) ? "voll" : "zu"}</span>` : "";
+  return `<span class="where">davon ${closed}${pills}</span>`;
+}
 // Same levels are grouped: "voll ×2".
 function pillsHtml(it, loc) {
   const groups = new Map();
@@ -90,7 +98,7 @@ function pillsHtml(it, loc) {
 }
 function whereHtml(it) {
   return LOCS.filter(l => inStock(it, l)).map(l =>
-    `<span class="where ${l}"><i></i>${LOC_SHORT[l]}${it[l] ? ` <b>${it[l]}</b>` : ""}${pillsHtml(it, l)}</span>`).join("");
+    `<span class="where ${l}"><i></i>${LOC_SHORT[l]} <b>${units(it, l)}</b>${pillsHtml(it, l)}</span>`).join("");
 }
 function bottleHtml(v) {
   return `<span class="bottle" aria-hidden="true"><span style="height:${Math.round(v * 100)}%"></span></span>`;
@@ -143,7 +151,7 @@ function setLeft(it, i, left) {
 function openPack(it, loc) {
   if (it[loc] <= 0) return false;
   bump(it, loc, -1);
-  setOpened(it, [...it.opened, { loc, left: isPieces(it) ? it.pack.size : 1 }]);
+  setOpened(it, [...it.opened, { loc, left: isPieces(it) ? it.pack.size : 0.75 }]);
   return true;
 }
 // One piece out: from the emptiest opened pack at that place, or open a new one.
@@ -358,15 +366,15 @@ function itemSheet(id, keepScroll, focus = null) {
   const prevScroll = keepScroll ? prev?.scrollTop : 0;
   const moreOpen = keepScroll && !!$("details.more", prev || document)?.open;
   const canOpen = isFill(it) || isPieces(it);
-  const closedLabel = isFill(it) ? "Volle Flaschen" : isPieces(it) ? "Geschlossene Packungen" : "Anzahl";
+  const closedLabel = isFill(it) ? "davon voll" : isPieces(it) ? "davon geschlossen" : "Anzahl";
   const locCard = l => {
     const rows = it.opened.map((o, i) => o.loc !== l ? "" : isFill(it)
       ? `<div class="orow">${bottleHtml(o.left)}${fillSegHtml(i, o.left)}</div>`
       : `<div class="orow"><span class="olabel">Angebrochen, noch Stück</span>${stepperHtml("op-" + i, o.left)}</div>`).join("");
     return `<section class="loccard">
-      <div class="lochead"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}</span></div>
+      <div class="lochead"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}</span>${canOpen ? `<span class="locbig">${units(it, l)}<small>${unitNoun(it, units(it, l))}</small></span>` : ""}</div>
       <div class="locline"><span>${closedLabel}</span>${stepperHtml("it-" + l, it[l])}</div>
-      ${rows ? `<div class="olist"><span class="label">Angebrochen</span>${rows}</div>` : ""}
+      ${rows ? `<div class="olist"><span class="olabel">davon angebrochen</span>${rows}</div>` : ""}
       ${canOpen && it[l] > 0 ? `<button type="button" class="linkbtn" data-open="${l}">${isFill(it) ? "Eine Flasche anbrechen" : "Eine Packung anbrechen"}</button>` : ""}
     </section>`;
   };
@@ -518,7 +526,7 @@ function renderShell() {
     const id = e.target.closest("[data-id]").dataset.id;
     const n = Math.max(0, Math.min(999, parseInt(e.target.value) || 0));
     const it = byId(id);
-    bump(it, state.view, n - it[state.view]); renderList();
+    bump(it, state.view, n - units(it, state.view)); renderList();
   });
   $("#empty").addEventListener("click", e => {
     if (e.target.closest("#show-empty")) { state.hideEmpty = false; saveUi(); renderList(); return; }
@@ -574,10 +582,11 @@ function rowHtml(it) {
       <button class="txt"><span class="name">${esc(it.name)}</span>${where ? `<span class="sub">${where}</span>` : ""}</button>
       <div class="total ${n ? "" : "out"}">${n || "leer"}</div></li>`;
   }
-  const pills = pillsHtml(it, loc);
+  // The number is all units here; + and − change the full / closed ones.
+  const davon = davonHtml(it, loc);
   return `<li class="${cls}" data-id="${it.id}">
-    <button class="txt"><span class="name">${esc(it.name)}</span>${pills ? `<span class="sub"><span class="where">+ angebrochen ${pills}</span></span>` : ""}</button>
-    ${stepperHtml("", it[loc])}</li>`;
+    <button class="txt"><span class="name">${esc(it.name)}</span>${davon ? `<span class="sub">${davon}</span>` : ""}</button>
+    ${stepperHtml("", units(it, loc))}</li>`;
 }
 
 function renderList() {
@@ -748,8 +757,8 @@ function showResult(id, opts = {}) {
   card.innerHTML = `
     <div class="head"><div style="min-width:0"><div class="name">${esc(it.name)}</div>
       <div class="hint">${LOC_NAME[loc]}${text ? ` · <span class="delta ${neg || /raus|angebrochen|weg/.test(text) ? "neg" : ""}">${esc(text)}</span>` : ""}</div>
-      ${pills && !fillPicker ? `<div class="hint">angebrochen ${pills}</div>` : ""}</div>
-      <div class="big" aria-label="Geschlossene ${unitNoun(it, 2)} im ${LOC_NAME[loc]}">${it[loc]}${it.pack.mode !== "count" ? `<small>${isFill(it) ? "voll" : "zu"}</small>` : ""}</div></div>
+      ${pills && !fillPicker ? `<div class="hint">${davonHtml(it, loc)}</div>` : ""}</div>
+      <div class="big" aria-label="${unitNoun(it, 2)} im ${LOC_NAME[loc]}">${units(it, loc)}${it.pack.mode !== "count" ? `<small>${unitNoun(it, units(it, loc))}</small>` : ""}</div></div>
     ${note ? `<div class="warnbox">${note}</div>` : ""}
     ${warning ? `<div class="warnbox">${warning}</div>` : ""}
     ${fillPicker && opened.length ? `<div class="olist"><div class="hint">Wie voll ${opened.length > 1 ? "sind die angebrochenen" : "ist sie"} jetzt?</div>
@@ -818,6 +827,16 @@ function renderLogin(error) {
   };
 }
 
+// Older versions let an opened bottle be "voll". Count those as unopened ones again.
+const settling = new Set();
+function settleFull(items) {
+  for (const it of items) {
+    if (!isFill(it) || !it.opened.some(o => o.left >= 1) || settling.has(it.id)) continue;
+    settling.add(it.id);
+    store.settleFull(it.id).catch(e => console.error(e)).finally(() => settling.delete(it.id));
+  }
+}
+
 // ---------- start ----------
 let unsubItems = null;
 function startMain() {
@@ -830,6 +849,7 @@ function startMain() {
     }
     state.loadError = null;
     state.items = items; state.loaded = true; state.pending = !!meta.pending;
+    settleFull(items);
     renderStatus();
     // Don't redraw the list under a finger that is typing a number.
     if (!document.activeElement?.matches?.("#list input")) renderList();
