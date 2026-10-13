@@ -1,6 +1,7 @@
 import { FirebaseStore, LocalStore, LOCS, onWriteError } from "./store.js";
 import { lookupProduct } from "./lookup.js";
 import { Scanner, beep, unlockAudio } from "./scanner.js";
+import { GROUPS, CATS, CAT, suggestCategory, suggestPack } from "./categories.js";
 
 const LOC_NAME = { keller: "Keller", aussen: "Außenlager" };
 
@@ -18,6 +19,7 @@ const state = {
   query: "",
   scanLoc: ui.scanLoc || "keller",
   scanDir: "in",
+  collapsed: new Set(ui.collapsed || []),
 };
 
 // ---------- helpers ----------
@@ -26,11 +28,16 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const norm = s => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/ß/g, "ss");
 const words = s => norm(s).split(/[^a-z0-9]+/).filter(w => w.length > 1);
 const total = it => it.keller + it.aussen;
+const inStock = (it, loc) => loc ? it[loc] > 0 || it.open?.loc === loc : total(it) > 0 || !!it.open;
 const byId = id => state.items.find(it => it.id === id);
 const byEan = ean => state.items.find(it => it.eans.includes(ean));
+const isPieces = it => it.pack.mode === "pieces" && it.pack.size > 1;
+const isFill = it => it.pack.mode === "fill";
 
 function loadUi() { try { return JSON.parse(localStorage.getItem("vk-ui") || "{}"); } catch { return {}; } }
-function saveUi() { try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc })); } catch {} }
+function saveUi() {
+  try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc, collapsed: [...state.collapsed] })); } catch {}
+}
 
 // Items whose names share most words with `name`: used to stop duplicates.
 function similar(name, exceptId) {
@@ -51,9 +58,22 @@ function similar(name, exceptId) {
     .map(x => x.it);
 }
 
+const FILL_STEPS = [0.25, 0.5, 0.75, 1];
+function fillLabel(v) { return v >= 1 ? "voll" : v >= 0.75 ? "¾ voll" : v >= 0.5 ? "halb voll" : "¼ voll"; }
+function openLabel(it) {
+  if (!it.open) return "";
+  return isFill(it) ? `angebrochen, ${fillLabel(it.open.left)}` : `angebrochen, noch ${it.open.left} Stück`;
+}
+function packNoun(it, n) {
+  if (isPieces(it)) return n === 1 ? "Packung" : "Packungen";
+  if (isFill(it)) return n === 1 ? "Flasche" : "Flaschen";
+  return "";
+}
+
 function whereHtml(it, skip) {
   const parts = LOCS.filter(l => l !== skip && it[l] > 0)
     .map(l => `<span class="where ${l}"><i></i><b>${it[l]}×</b> ${LOC_NAME[l]}</span>`);
+  if (it.open && it.open.loc !== skip) parts.push(`<span class="where ${it.open.loc} opened"><i></i>${esc(openLabel(it))}</span>`);
   return parts.join("");
 }
 
@@ -79,6 +99,37 @@ function errText(e, what) {
 }
 onWriteError(e => toast(errText(e, "Speichern hat nicht geklappt.")));
 
+// ---------- stock changes (optimistic, then stored) ----------
+function bump(it, loc, d) {
+  if (d < 0 && it[loc] + d < 0) d = -it[loc];
+  if (!d) return;
+  store.bump(it.id, loc, d);
+  it[loc] += d;
+}
+function setOpen(it, open) {
+  it.open = open;
+  store.update(it.id, { open });
+}
+// Take a closed pack and make it the opened one.
+function openPack(it, loc) {
+  if (it[loc] <= 0) return false;
+  bump(it, loc, -1);
+  setOpen(it, { loc, left: isPieces(it) ? it.pack.size : 1 });
+  return true;
+}
+// One piece out: from the opened pack, opening a new one if needed.
+function takePiece(it, loc) {
+  if (!it.open && !openPack(it, loc)) return false;
+  const left = it.open.left - 1;
+  setOpen(it, left > 0 ? { ...it.open, left } : null);
+  return true;
+}
+const snapshot = it => ({ keller: it.keller, aussen: it.aussen, open: it.open ? { ...it.open } : null });
+function restore(it, snap) {
+  for (const l of LOCS) bump(it, l, snap[l] - it[l]);
+  setOpen(it, snap.open);
+}
+
 // ---------- sheets ----------
 function openSheet(html, onClose) {
   const host = $("#sheet");
@@ -103,30 +154,86 @@ function stepperHtml(key, n) {
     <button type="button" class="plus" data-d="1" aria-label="Eins mehr">+</button></div>`;
 }
 
+function catSelectHtml(id, selected) {
+  const opt = c => `<option value="${c.id}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}</option>`;
+  return `<select class="text select" id="${id}">
+      <option value="" ${selected ? "" : "selected"}>Ohne Rubrik</option>
+      ${GROUPS.map(g => `<optgroup label="${g.name}">${CATS.filter(c => c.g === g.id).map(opt).join("")}</optgroup>`).join("")}
+    </select>`;
+}
+
+function packFieldHtml(prefix, pack) {
+  return `<div class="field"><span class="label">Wie wird gezählt?</span>
+    <div class="seg" id="${prefix}-mode">
+      <button type="button" data-m="count" aria-pressed="${pack.mode === "count"}">Stück</button>
+      <button type="button" data-m="pieces" aria-pressed="${pack.mode === "pieces"}">Packung mit Inhalt</button>
+      <button type="button" data-m="fill" aria-pressed="${pack.mode === "fill"}">Füllstand</button>
+    </div>
+    <div class="packsize" id="${prefix}-sizewrap" ${pack.mode === "pieces" ? "" : "hidden"}>
+      <label for="${prefix}-size">Stück pro Packung</label>
+      <input class="text small" id="${prefix}-size" inputmode="numeric" pattern="[0-9]*" value="${pack.size || ""}" placeholder="z. B. 8">
+    </div>
+    <div class="hint" id="${prefix}-modehint">${packHint(pack.mode)}</div>
+  </div>`;
+}
+function packHint(mode) {
+  return {
+    count: "Jedes Teil zählt einzeln, z. B. Dosen oder Wasserflaschen.",
+    pieces: "Eine Packung enthält mehrere Stück, z. B. Riegel. Beim Rausnehmen zählst du einzelne Stück.",
+    fill: "Für Flaschen, aus denen man nach und nach etwas nimmt. Angebrochene bekommen einen Füllstand.",
+  }[mode];
+}
+function wirePackField(root, prefix, pack, onChange) {
+  $(`#${prefix}-mode`, root).addEventListener("click", e => {
+    const b = e.target.closest("[data-m]"); if (!b) return;
+    pack.mode = b.dataset.m;
+    root.querySelectorAll(`#${prefix}-mode [data-m]`).forEach(x => x.setAttribute("aria-pressed", x === b));
+    $(`#${prefix}-sizewrap`, root).hidden = pack.mode !== "pieces";
+    $(`#${prefix}-modehint`, root).textContent = packHint(pack.mode);
+    if (pack.mode === "pieces") $(`#${prefix}-size`, root).focus();
+    onChange && onChange();
+  });
+  $(`#${prefix}-size`, root).addEventListener("change", e => {
+    pack.size = Math.max(0, Math.min(999, parseInt(e.target.value) || 0));
+    onChange && onChange();
+  });
+}
+
 // New item: from the + button, an empty search, or an unknown barcode.
 function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, lookingUp = false, onDone } = {}) {
   const counts = { keller: 0, aussen: 0 }; counts[loc] = n;
+  const pack = { size: 0, ...suggestPack(name) };
+  let hit = null, catTouched = false;
   const s = openSheet(`
     <h2>${ean ? "Neuer Artikel" : "Artikel anlegen"}</h2>
     ${ean ? `<div class="hint" id="ni-hint">${lookingUp ? `<span class="spinner"></span>&nbsp; Suche Produktnamen …` : "Diesen Barcode kennt eure Vorratskammer noch nicht."}</div>` : ""}
     <div class="field"><label for="ni-name">Name</label>
       <input class="text" id="ni-name" value="${esc(name)}" placeholder="z. B. Passierte Tomaten 500 g" autocomplete="off" enterkeyhint="done"></div>
     <div class="suggest" id="ni-sim"></div>
+    <div class="field"><label for="ni-cat">Rubrik <span class="tag" id="ni-cattag" hidden>Vorschlag</span></label>${catSelectHtml("ni-cat", null)}</div>
     <div class="field"><span class="label">Wie viele?</span>
       ${LOCS.map(l => `<div class="locline"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}</span>${stepperHtml("ni-" + l, counts[l])}</div>`).join("")}
     </div>
+    <details class="more"><summary>Packung mit Inhalt oder Füllstand?</summary>${packFieldHtml("ni", pack)}</details>
     ${ean ? `<div class="hint">Barcode ${esc(ean)} wird gemerkt. Beim nächsten Scan wird der Artikel sofort erkannt.</div>` : ""}
     <div class="btnrow"><button class="btn ghost" id="ni-cancel">Abbrechen</button><button class="btn primary" id="ni-save">Speichern</button></div>
   `, () => onDone && onDone(null));
 
-  const nameEl = $("#ni-name", s);
+  const nameEl = $("#ni-name", s), catEl = $("#ni-cat", s);
+  const suggest = () => {
+    if (catTouched) return;
+    const c = nameEl.value.trim() ? suggestCategory(nameEl.value, hit || {}, state.items) : null;
+    catEl.value = c || "";
+    $("#ni-cattag", s).hidden = !c;
+  };
+  catEl.addEventListener("change", () => { catTouched = true; $("#ni-cattag", s).hidden = true; });
   const showSimilar = () => {
     const sim = similar(nameEl.value);
     $("#ni-sim", s).innerHTML = sim.length ? `<span class="label">Schon vorhanden?</span>` + sim.map(it =>
       `<button type="button" data-id="${it.id}"><span>${esc(it.name)}</span><span>${ean ? "Das ist es" : "Öffnen"}</span></button>`).join("") : "";
   };
-  nameEl.addEventListener("input", showSimilar);
-  showSimilar();
+  nameEl.addEventListener("input", () => { showSimilar(); suggest(); });
+  showSimilar(); suggest();
   $("#ni-sim", s).addEventListener("click", e => {
     const b = e.target.closest("[data-id]"); if (!b) return;
     const it = byId(b.dataset.id);
@@ -140,12 +247,16 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
       itemSheet(it.id);
     }
   });
-  wireSteppers(s, (key, n) => { counts[key.slice(3)] = n; return n; }, key => counts[key.slice(3)]);
+  wireSteppers(s, (key, v) => { counts[key.slice(3)] = v; return v; }, key => counts[key.slice(3)]);
+  wirePackField(s, "ni", pack);
   $("#ni-cancel", s).onclick = closeSheet;
   $("#ni-save", s).onclick = async () => {
     const nm = nameEl.value.trim();
     if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
-    const id = await store.add({ name: nm, eans: ean ? [ean] : [], keller: counts.keller, aussen: counts.aussen, home: loc });
+    const id = await store.add({
+      name: nm, eans: ean ? [ean] : [], keller: counts.keller, aussen: counts.aussen, home: loc,
+      cat: catEl.value || null, pack: { mode: pack.mode, size: pack.mode === "pieces" ? pack.size : 0 },
+    });
     const done = onDone; onDone = null;
     closeSheet();
     toast(`${nm} angelegt`);
@@ -153,11 +264,16 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
   };
   if (!ean) setTimeout(() => nameEl.focus(), 60);
   return {
-    setName(v) {
-      const h = $("#ni-hint", s);
-      if (h) h.textContent = v ? "Name aus der Produktdatenbank, bitte kurz prüfen." : "Nicht in der Produktdatenbank. Bitte Namen eintippen.";
-      if (v && !nameEl.value) { nameEl.value = v; showSimilar(); }
-      if (!v) nameEl.focus();
+    setProduct(h) {
+      hit = h;
+      const hint = $("#ni-hint", s);
+      if (hint) hint.textContent = h ? "Name aus der Produktdatenbank, bitte kurz prüfen." : "Nicht in der Produktdatenbank. Bitte Namen eintippen.";
+      if (h && !nameEl.value) {
+        nameEl.value = h.name; showSimilar();
+        Object.assign(pack, suggestPack(h.name));
+      }
+      suggest();
+      if (!h) nameEl.focus();
     },
   };
 }
@@ -169,7 +285,7 @@ function wireSteppers(root, set, get) {
     inp.value = n; inp.classList.toggle("zero", !n);
     st.querySelector("[data-d='-1']").disabled = !n;
   };
-  root.querySelectorAll(".stepper").forEach(st => {
+  root.querySelectorAll(".stepper[data-key]").forEach(st => {
     const key = st.dataset.key;
     st.addEventListener("click", e => {
       const b = e.target.closest("[data-d]"); if (!b) return;
@@ -182,27 +298,75 @@ function wireSteppers(root, set, get) {
   });
 }
 
-// Details of one item: counts in both places, rename, barcodes, delete.
-function itemSheet(id) {
+// The opened pack of an item: pieces left, or fill level.
+function openBlockHtml(it) {
+  if (it.pack.mode === "count" || (it.pack.mode === "pieces" && !isPieces(it))) return "";
+  const noun = isFill(it) ? "Flasche" : "Packung";
+  if (!it.open) {
+    const from = LOCS.find(l => it[l] > 0);
+    return `<div class="field"><span class="label">Angebrochen</span>
+      ${from ? `<button class="btn ghost small" id="op-open" data-loc="${from}">${noun} im ${LOC_NAME[from]} anbrechen</button>`
+             : `<span class="hint">Keine ${noun} da, die man anbrechen könnte.</span>`}</div>`;
+  }
+  const body = isFill(it)
+    ? `<div class="seg" id="op-fill">${FILL_STEPS.map(v => `<button type="button" data-v="${v}" aria-pressed="${it.open.left === v}">${v === 1 ? "voll" : v === 0.75 ? "¾" : v === 0.5 ? "½" : "¼"}</button>`).join("")}</div>`
+    : `<div class="locline"><span>Noch drin</span>${stepperHtml("op-left", it.open.left)}</div>`;
+  return `<div class="field"><span class="label">Angebrochen im ${LOC_NAME[it.open.loc]}</span>${body}
+    <button class="linkbtn" id="op-empty">${noun} ist leer, weg damit</button></div>`;
+}
+
+// Details of one item: counts, category, pack, opened pack, barcodes, delete.
+function itemSheet(id, keepScroll) {
   const it = byId(id); if (!it) return;
+  const prevScroll = keepScroll ? $("#sheet .sheet")?.scrollTop : 0;
   const s = openSheet(`
     <div class="field"><label for="it-name">Name</label><input class="text" id="it-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
-    ${LOCS.map(l => `<div class="locline"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}</span>${stepperHtml("it-" + l, it[l])}</div>`).join("")}
+    ${LOCS.map(l => `<div class="locline"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}${packNoun(it, 2) ? ` <span class="hint">(${packNoun(it, 2)})</span>` : ""}</span>${stepperHtml("it-" + l, it[l])}</div>`).join("")}
+    ${openBlockHtml(it)}
+    <div class="field"><label for="it-cat">Rubrik</label>${catSelectHtml("it-cat", it.cat)}</div>
+    ${packFieldHtml("it", { ...it.pack })}
     <div class="field"><span class="label">Barcodes</span>
       <div class="chips">${it.eans.length ? it.eans.map(e => `<span class="chip">${esc(e)}</span>`).join("") : `<span class="hint">Noch keiner. Scanne den Artikel und wähle ihn bei „Schon vorhanden?“ aus.</span>`}</div></div>
     <button class="btn primary" id="it-done">Fertig</button>
     <button class="linkbtn danger" id="it-del">Artikel löschen</button>
   `);
+  if (prevScroll) s.scrollTop = prevScroll;
   const nameEl = $("#it-name", s);
-  const saveName = () => { const v = nameEl.value.trim(); const cur = byId(id); if (v && cur && v !== cur.name) store.update(id, { name: v }); };
+  const saveName = () => { const v = nameEl.value.trim(); const cur = byId(id); if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; } };
   nameEl.addEventListener("change", saveName);
-  wireSteppers(s, (key, n, d) => {
-    const loc = key.slice(3), cur = byId(id);
-    if (!cur) return n;
-    if (n !== cur[loc]) store.bump(id, loc, n - cur[loc]);
-    cur[loc] = n; // optimistic until the snapshot arrives
+  const redraw = () => { saveName(); itemSheet(id, true); renderList(); };
+
+  wireSteppers(s, (key, n) => {
+    const cur = byId(id); if (!cur) return n;
+    if (key === "op-left") {
+      setOpen(cur, n > 0 ? { ...cur.open, left: n } : null);
+      if (!n) redraw();
+      return n;
+    }
+    bump(cur, key.slice(3), n - cur[key.slice(3)]);
+    renderList();
     return n;
-  }, key => byId(id)?.[key.slice(3)] ?? 0);
+  }, key => key === "op-left" ? byId(id)?.open?.left ?? 0 : byId(id)?.[key.slice(3)] ?? 0);
+
+  $("#it-cat", s).addEventListener("change", e => { const cur = byId(id); cur.cat = e.target.value || null; store.update(id, { cat: cur.cat }); renderList(); });
+  const pack = { ...it.pack };
+  wirePackField(s, "it", pack, () => {
+    const cur = byId(id);
+    const next = { mode: pack.mode, size: pack.mode === "pieces" ? pack.size : 0 };
+    const changedKind = next.mode !== cur.pack.mode;
+    cur.pack = next;
+    const patch = { pack: next };
+    if (changedKind && cur.open) { cur.open = null; patch.open = null; }
+    store.update(id, patch);
+    if (changedKind || next.mode === "pieces") redraw();
+  });
+  const op = $("#op-open", s);
+  if (op) op.onclick = () => { openPack(byId(id), op.dataset.loc); redraw(); };
+  const fill = $("#op-fill", s);
+  if (fill) fill.onclick = e => { const b = e.target.closest("[data-v]"); if (!b) return; const cur = byId(id); setOpen(cur, { ...cur.open, left: Number(b.dataset.v) }); redraw(); };
+  const empty = $("#op-empty", s);
+  if (empty) empty.onclick = () => { setOpen(byId(id), null); redraw(); };
+
   $("#it-done", s).onclick = () => { saveName(); closeSheet(); };
   $("#it-del", s).onclick = () => {
     const cur = byId(id);
@@ -256,14 +420,19 @@ function renderShell() {
 
   const list = $("#list");
   list.addEventListener("click", e => {
+    const head = e.target.closest("[data-cat]");
+    if (head) {
+      const c = head.dataset.cat;
+      state.collapsed.has(c) ? state.collapsed.delete(c) : state.collapsed.add(c);
+      saveUi(); renderList();
+      return;
+    }
     const row = e.target.closest("[data-id]"); if (!row) return;
     const id = row.dataset.id;
     const b = e.target.closest("[data-d]");
     if (b) {
-      const it = byId(id), loc = state.view, d = Number(b.dataset.d);
-      if (d < 0 && !it[loc]) return;
-      store.bump(id, loc, d);
-      it[loc] = Math.max(0, it[loc] + d); renderList();
+      const it = byId(id), d = Number(b.dataset.d);
+      bump(it, state.view, d); renderList();
       return;
     }
     if (e.target.closest(".txt")) itemSheet(id);
@@ -274,8 +443,7 @@ function renderShell() {
     const id = e.target.closest("[data-id]").dataset.id;
     const n = Math.max(0, Math.min(999, parseInt(e.target.value) || 0));
     const it = byId(id);
-    if (n !== it[state.view]) store.bump(id, state.view, n - it[state.view]);
-    it[state.view] = n; renderList();
+    bump(it, state.view, n - it[state.view]); renderList();
   });
   $("#empty").addEventListener("click", e => {
     if (e.target.closest("#add-q")) newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
@@ -306,34 +474,61 @@ function visibleItems() {
   const q = norm(state.query).trim();
   let list = state.items;
   // A place shows what is there now, plus what used to be there (so you can count it back up).
-  if (state.view !== "alle") list = list.filter(it => it[state.view] > 0 || it.locs.includes(state.view));
+  if (state.view !== "alle") list = list.filter(it => inStock(it, state.view) || it.locs.includes(state.view));
   if (q) {
     const qs = q.split(/\s+/);
     list = list.filter(it => { const n = norm(it.name); return qs.every(w => n.includes(w)) || it.eans.includes(q); });
   }
-  const key = it => (state.view === "alle" ? total(it) : it[state.view]) > 0 ? 0 : 1;
+  const key = it => inStock(it, state.view === "alle" ? null : state.view) ? 0 : 1;
   return [...list].sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name, "de"));
+}
+
+function rowHtml(it) {
+  if (state.view === "alle") {
+    const t = total(it);
+    const big = t ? t : it.open ? `<span class="out">Rest</span>` : "leer";
+    return `<li class="item" data-id="${it.id}">
+      <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub">${whereHtml(it) || `<span>Nichts mehr da</span>`}</span></button>
+      <div class="total ${t ? "" : "out"}">${big}</div></li>`;
+  }
+  const n = it[state.view], others = whereHtml(it, state.view);
+  const here = it.open?.loc === state.view ? `<span class="where ${state.view} opened"><i></i>${esc(openLabel(it))}</span>` : "";
+  const sub = [n || here ? "" : "<span>Hier leer</span>", here, others ? `<span>sonst ${others}</span>` : ""].join("");
+  return `<li class="item" data-id="${it.id}">
+    <button class="txt"><span class="name">${esc(it.name)}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>
+    ${stepperHtml("", n)}</li>`;
 }
 
 function renderList() {
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
   $("#n-alle").textContent = state.items.length || "";
-  for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => it[l] > 0 || it.locs.includes(l)).length || "";
+  for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l) || it.locs.includes(l)).length || "";
   $("#qclear").hidden = !state.query;
 
   const list = visibleItems();
-  $("#list").innerHTML = list.map(it => {
-    if (state.view === "alle") {
-      const t = total(it);
-      return `<li class="item" data-id="${it.id}">
-        <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub">${whereHtml(it) || `<span>Nichts mehr da</span>`}</span></button>
-        <div class="total ${t ? "" : "out"}">${t || "leer"}</div></li>`;
-    }
-    const n = it[state.view], others = whereHtml(it, state.view);
-    return `<li class="item" data-id="${it.id}">
-      <button class="txt"><span class="name">${esc(it.name)}</span>${others || !n ? `<span class="sub">${n ? "" : "<span>Hier leer</span>"}${others ? `<span>noch ${others}</span>` : ""}</span>` : ""}</button>
-      ${stepperHtml("row", n)}</li>`;
-  }).join("");
+  // Group by Rubrik: Ohne Rubrik first (so it gets sorted), then Food, then Non-Food.
+  const byCat = new Map();
+  for (const it of list) {
+    const c = it.cat && CAT[it.cat] ? it.cat : "";
+    if (!byCat.has(c)) byCat.set(c, []);
+    byCat.get(c).push(it);
+  }
+  const searching = !!state.query.trim();
+  const section = (key, title) => {
+    const rows = byCat.get(key); if (!rows) return "";
+    const closed = !searching && state.collapsed.has(key || "none");
+    const have = rows.filter(it => inStock(it, state.view === "alle" ? null : state.view)).length;
+    return `<li class="cathead"><button data-cat="${key || "none"}" aria-expanded="${!closed}">
+        <span>${esc(title)}</span><span class="cnt">${have}${have !== rows.length ? ` / ${rows.length}` : ""}</span><span class="chev" aria-hidden="true">›</span></button></li>
+      ${closed ? "" : rows.map(rowHtml).join("")}`;
+  };
+  let html = section("", "Ohne Rubrik");
+  for (const g of GROUPS) {
+    const cats = CATS.filter(c => c.g === g.id && byCat.has(c.id));
+    if (!cats.length) continue;
+    html += `<li class="grouphead">${g.name}</li>` + cats.map(c => section(c.id, c.name)).join("");
+  }
+  $("#list").innerHTML = html;
 
   let empty = "";
   if (state.loadError) empty = `<div class="empty"><strong>Da stimmt etwas nicht.</strong><span>${esc(state.loadError)}</span></div>`;
@@ -351,7 +546,6 @@ function renderList() {
 
 // ---------- scanner ----------
 let scanner = null;
-let lastResult = null;
 
 function openScanner() {
   const host = $("#scanhost");
@@ -387,7 +581,7 @@ function openScanner() {
 
 function closeScanner() {
   if (scanner) scanner.stop();
-  scanner = null; lastResult = null;
+  scanner = null;
   $("#scanhost").innerHTML = "";
   document.body.style.overflow = "";
   document.body.classList.remove("scanning");
@@ -419,63 +613,88 @@ async function onScan(code) {
       if (!scanner) return;
       scanner.paused = false;
       if (id && linked) countScan(id);
-      else if (id) setTimeout(() => showResult(id, null), 300);
+      else if (id) setTimeout(() => showResult(id, { text: "Neu angelegt" }), 300);
     },
   });
-  const name = await lookupProduct(code);
-  sheet.setName(name);
+  sheet.setProduct(await lookupProduct(code));
 }
 
 // Count a known item according to the Rein/Raus and place settings.
 function countScan(id) {
   const it = byId(id); if (!it) return;
-  const loc = state.scanLoc, d = state.scanDir === "in" ? 1 : -1;
-  if (d < 0 && it[loc] === 0) {
-    const other = LOCS.find(l => l !== loc && it[l] > 0);
-    beep(false);
-    showResult(id, null, other
-      ? `Im ${LOC_NAME[loc]} ist laut App keins mehr, im ${LOC_NAME[other]} noch ${it[other]}.`
-      : `Laut App ist nirgends mehr ${esc(it.name)} da.`, other);
-    return;
+  const loc = state.scanLoc, snap = snapshot(it);
+
+  if (state.scanDir === "in") {
+    bump(it, loc, 1);
+    return showResult(id, { loc, text: `+1 ${packNoun(it, 1) || ""} rein`.replace("  ", " "), snap });
   }
-  store.bump(id, loc, d);
-  it[loc] = Math.max(0, it[loc] + d);
-  showResult(id, { loc, d });
+
+  // Raus. Where is something to take? Prefer the chosen place.
+  const opened = it.pack.mode !== "count" && it.open && (it.open.loc === loc || it[loc] === 0) ? it.open.loc : null;
+  const from = opened || (it[loc] > 0 ? loc : LOCS.find(l => it[l] > 0 || it.open?.loc === l));
+  if (!from) {
+    beep(false);
+    return showResult(id, { warning: `Laut App ist nirgends mehr ${esc(it.name)} da.` });
+  }
+  const note = from !== loc ? `Im ${LOC_NAME[loc]} war laut App nichts mehr, genommen aus dem ${LOC_NAME[from]}.` : null;
+
+  if (isPieces(it)) {
+    takePiece(it, from);
+    return showResult(id, { loc: from, text: "1 Stück raus", snap, note, wholeOption: true });
+  }
+  if (isFill(it)) {
+    // Taking a bottle out to pour from: it becomes (or stays) the opened one.
+    if (!it.open) openPack(it, from);
+    return showResult(id, { loc: it.open.loc, text: "angebrochen", snap, note, fillPicker: true, wholeOption: true });
+  }
+  bump(it, from, -1);
+  showResult(id, { loc: from, text: "−1 raus", neg: true, snap, note });
 }
 
-// The card at the bottom of the scanner: what just happened, with +/- to correct.
-function showResult(id, change, warning, other) {
+// The card at the bottom of the scanner: what just happened, with ways to correct it.
+function showResult(id, { loc, text, neg, snap, note, warning, fillPicker, wholeOption } = {}) {
   const it = byId(id); const card = $("#sc-card"); if (!it || !card) return;
-  lastResult = { id, change };
-  const loc = change?.loc || state.scanLoc;
+  loc = loc || state.scanLoc;
+  const openLine = it.open ? `<div class="hint">${esc(openLabel(it))} (${LOC_NAME[it.open.loc]})</div>` : "";
   card.innerHTML = `
     <div class="head"><div style="min-width:0"><div class="name">${esc(it.name)}</div>
-      <div class="hint">${LOC_NAME[loc]}${change ? ` · <span class="delta ${change.d < 0 ? "neg" : ""}">${change.d > 0 ? "+1 rein" : "−1 raus"}</span>` : ""}</div></div>
-      <div class="big" aria-label="Jetzt im ${LOC_NAME[loc]}">${it[loc]}</div></div>
+      <div class="hint">${LOC_NAME[loc]}${text ? ` · <span class="delta ${neg || /raus|angebrochen/.test(text) ? "neg" : ""}">${esc(text)}</span>` : ""}</div>${openLine}</div>
+      <div class="big" aria-label="Volle ${packNoun(it, 2) || "Stück"} im ${LOC_NAME[loc]}">${it[loc]}</div></div>
+    ${note ? `<div class="warnbox">${note}</div>` : ""}
     ${warning ? `<div class="warnbox">${warning}</div>` : ""}
+    ${fillPicker && it.open ? `<div><div class="hint">Wie voll ist sie noch?</div><div class="seg" id="sc-fill">${FILL_STEPS.map(v => `<button type="button" data-v="${v}" aria-pressed="${it.open.left === v}">${v === 1 ? "voll" : v === 0.75 ? "¾" : v === 0.5 ? "½" : "¼"}</button>`).join("")}<button type="button" data-v="0">leer</button></div></div>` : ""}
     <div class="btnrow">
-      ${other ? `<button class="btn ghost small" id="sc-other">Aus ${LOC_NAME[other]} nehmen</button>`
-              : `<div class="stepper" style="justify-self:start">${`<button type="button" data-d="-1" aria-label="Eins weniger" ${it[loc] ? "" : "disabled"}>−</button><button type="button" class="plus" data-d="1" aria-label="Eins mehr">+</button>`}</div>`}
-      ${change ? `<button class="btn ghost small" id="sc-undo">Rückgängig</button>` : `<span></span>`}
+      ${wholeOption ? `<button class="btn ghost small" id="sc-whole">Ganze ${packNoun(it, 1)} raus</button>`
+        : `<div class="stepper" style="justify-self:start"><button type="button" data-d="-1" aria-label="Eins weniger" ${it[loc] ? "" : "disabled"}>−</button><button type="button" class="plus" data-d="1" aria-label="Eins mehr">+</button></div>`}
+      ${snap ? `<button class="btn ghost small" id="sc-undo">Rückgängig</button>` : `<span></span>`}
     </div>`;
-  card.querySelectorAll("[data-d]").forEach(b => b.onclick = () => {
-    const d = Number(b.dataset.d), cur = byId(id);
-    if (d < 0 && !cur[loc]) return;
-    store.bump(id, loc, d); cur[loc] = Math.max(0, cur[loc] + d);
-    showResult(id, change, null);
+  card.querySelectorAll(".stepper [data-d]").forEach(b => b.onclick = () => {
+    const cur = byId(id); bump(cur, loc, Number(b.dataset.d));
+    showResult(id, { loc, text, neg, snap });
   });
+  const fill = $("#sc-fill", card);
+  if (fill) fill.onclick = e => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    const cur = byId(id), v = Number(b.dataset.v);
+    setOpen(cur, v > 0 ? { ...cur.open, left: v } : null);
+    showResult(id, { loc, text: v > 0 ? `angebrochen, ${fillLabel(v)}` : "leer, weg damit", snap, fillPicker: v > 0, wholeOption });
+  };
+  const whole = $("#sc-whole", card);
+  if (whole) whole.onclick = () => {
+    // Undo the piece / opening, take a whole closed pack instead.
+    const cur = byId(id);
+    restore(cur, snap);
+    const from = cur[loc] > 0 ? loc : LOCS.find(l => cur[l] > 0);
+    if (!from) return showResult(id, { warning: `Keine volle ${packNoun(cur, 1)} mehr da.`, snap });
+    bump(cur, from, -1);
+    showResult(id, { loc: from, text: `ganze ${packNoun(cur, 1)} raus`, neg: true, snap });
+  };
   const undo = $("#sc-undo", card);
   if (undo) undo.onclick = () => {
     const cur = byId(id);
-    store.bump(id, change.loc, -change.d); cur[change.loc] = Math.max(0, cur[change.loc] - change.d);
+    restore(cur, snap);
     scanner && scanner.forget();
-    card.innerHTML = `<div class="hint">Rückgängig gemacht: ${esc(cur.name)} steht wieder bei ${cur[change.loc]}.</div>`;
-  };
-  const o = $("#sc-other", card);
-  if (o) o.onclick = () => {
-    const cur = byId(id);
-    store.bump(id, other, -1); cur[other] = Math.max(0, cur[other] - 1);
-    showResult(id, { loc: other, d: -1 });
+    card.innerHTML = `<div class="hint">Rückgängig gemacht: ${esc(cur.name)}.</div>`;
   };
 }
 

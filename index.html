@@ -138,6 +138,22 @@ ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .delta.neg{color:var(--warn)}
 .warnbox{background:var(--warn-soft);border-radius:12px;padding:10px 12px;font-size:.92rem}
 
+.grouphead{font:700 .8rem var(--font);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:14px 2px 0}
+.cathead button{width:100%;display:flex;align-items:center;gap:8px;border:0;background:none;padding:8px 2px 2px;font:700 1.05rem var(--font-round);text-align:left}
+.cathead .cnt{font:500 .8rem var(--num);color:var(--muted);margin-left:auto}
+.cathead .chev{color:var(--muted);transition:transform .15s;font-size:1.2rem;line-height:1}
+.cathead button[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.where.opened{font-style:italic}
+.where.opened i{border-radius:50%}
+.select{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 20px) 50%,calc(100% - 14px) 50%;background-size:6px 6px;background-repeat:no-repeat;padding-right:36px}
+.packsize{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.packsize label{font-weight:600}
+.text.small{width:7ch;text-align:center}
+details.more{border-top:1px solid var(--line);padding-top:10px}
+details.more summary{color:var(--accent);font-weight:600;font-size:.95rem;cursor:pointer;padding:4px 0}
+details.more[open] summary{margin-bottom:10px}
+.tag{font:600 .68rem var(--font);text-transform:uppercase;letter-spacing:.06em;color:var(--accent);background:var(--accent-soft);border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:1px}
+.seg{flex-wrap:wrap}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:40;background:var(--fg);color:var(--bg);padding:11px 14px;border-radius:12px;font-size:.92rem;display:flex;gap:14px;align-items:center;max-width:calc(100% - 32px);box-shadow:var(--shadow)}
 .scanning .toast{bottom:auto;top:calc(env(safe-area-inset-top,0px) + 130px)}
 .toast button{border:0;background:none;color:var(--accent-soft);font-weight:700;padding:0}

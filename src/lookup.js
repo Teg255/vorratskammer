@@ -1,12 +1,13 @@
 // Product names from the free Open Food Facts family of databases.
-// Food first, then household and cosmetics. Returns a short German name or null.
+// Food first, then household and cosmetics.
+// Returns {name, tags, source} or null.
 
 const SOURCES = [
   "https://world.openfoodfacts.org",
   "https://world.openproductsfacts.org",
   "https://world.openbeautyfacts.org",
 ];
-const FIELDS = "product_name_de,product_name,generic_name_de,brands,quantity";
+const FIELDS = "product_name_de,product_name,generic_name_de,brands,quantity,categories_tags";
 const cache = new Map();
 
 function withTimeout(ms) {
@@ -35,7 +36,11 @@ export async function lookupProduct(ean) {
       const j = await r.json();
       if (j.status === 1 && j.product) {
         const name = formatName(j.product);
-        if (name) { cache.set(ean, name); return name; }
+        if (name) {
+          const hit = { name, tags: j.product.categories_tags || [], source: base };
+          cache.set(ean, hit);
+          return hit;
+        }
       }
     } catch { /* offline or slow: try next / give up */ }
   }
