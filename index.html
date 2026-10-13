@@ -34,7 +34,7 @@
   --shadow:0 1px 2px rgb(0 0 0 / .3),0 6px 20px rgb(0 0 0 / .35);
   color-scheme:dark}}
 *{box-sizing:border-box}
-html,body{height:100%;margin:0;background:var(--bg)}
+html,body{height:100%;margin:0;background:var(--bg);overflow-x:hidden}
 body{color:var(--fg);font:17px/1.4 var(--font);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 button,input{font:inherit;color:inherit}
 button{cursor:pointer}
@@ -63,7 +63,7 @@ ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .item .txt{flex:1;min-width:0;border:0;background:none;text-align:left;padding:4px 0;align-self:stretch;display:flex;flex-direction:column;justify-content:center}
 .name{font-weight:600;font-size:1.02rem;overflow-wrap:anywhere;line-height:1.25}
 .sub{font-size:.84rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:3px}
-.where{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.where{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px 5px;min-width:0}
 .where i{width:8px;height:8px;border-radius:2px;display:inline-block}
 .where.keller i{background:var(--keller)} .where.aussen i{background:var(--aussen)}
 .where b{font:700 .84rem var(--num);color:var(--fg)}
@@ -154,7 +154,7 @@ details.more summary{color:var(--accent);font-weight:600;font-size:.95rem;cursor
 details.more[open] summary{margin-bottom:10px}
 .morebody{display:grid;gap:14px}
 .item.none .name{color:var(--muted);font-weight:500}
-.pill{font:600 .8rem/1.3 var(--font);color:var(--fg);border:1px dashed var(--muted);border-radius:6px;padding:0 5px;margin-left:3px}
+.pill{font:600 .8rem/1.3 var(--font);white-space:nowrap;color:var(--fg);border:1px dashed var(--muted);border-radius:6px;padding:0 5px;margin-left:3px}
 .viewopts{display:flex;justify-content:flex-end}
 .toggle{display:flex;align-items:center;gap:8px;border:0;background:none;color:var(--muted);font-size:.88rem;font-weight:600;padding:2px 0}
 .toggle .sw{width:34px;height:20px;border-radius:10px;background:var(--line);position:relative;transition:background .15s}
@@ -177,6 +177,11 @@ details.more[open] summary{margin-bottom:10px}
 .bottle{flex:none;width:16px;height:32px;border:2px solid var(--muted);border-radius:5px 5px 6px 6px;position:relative;overflow:hidden}
 .bottle span{position:absolute;left:0;right:0;bottom:0;background:var(--accent)}
 .sumline{margin-top:4px;font-size:.95rem}
+.otherloc{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1px solid var(--line);background:var(--bg);border-radius:12px;padding:10px 12px;font-size:.92rem;color:var(--fg)}
+.otherloc i{flex:none;width:8px;height:8px;border-radius:2px}
+.otherloc span:nth-child(2){flex:1;min-width:0}
+.otherloc.no{color:var(--muted)}
+.otherloc .chev{color:var(--muted);font-size:1.2rem;line-height:1}
 .scanner .card .big{text-align:right}
 .scanner .card .big small{display:block;font:600 .7rem var(--font);color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 .scanner .card .olist{max-height:34vh;overflow:auto}

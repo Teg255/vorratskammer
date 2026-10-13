@@ -79,9 +79,14 @@ function packNoun(it, n) {
 const unitNoun = (it, n) => packNoun(it, n) || "Stück";
 
 // Small badges for the opened packs or bottles at a place, emptiest first.
+// Same levels are grouped: "voll ×2".
 function pillsHtml(it, loc) {
-  return openedIn(it, loc).sort((a, b) => a.left - b.left)
-    .map(o => `<span class="pill">${isFill(it) ? fillShort(o.left) : `${o.left} St.`}</span>`).join("");
+  const groups = new Map();
+  for (const o of openedIn(it, loc).sort((a, b) => a.left - b.left)) {
+    const t = isFill(it) ? fillShort(o.left) : `${o.left} St.`;
+    groups.set(t, (groups.get(t) || 0) + 1);
+  }
+  return [...groups].map(([t, n]) => `<span class="pill">${t}${n > 1 ? ` ×${n}` : ""}</span>`).join("");
 }
 function whereHtml(it) {
   return LOCS.filter(l => inStock(it, l)).map(l =>
@@ -326,22 +331,28 @@ function wireSteppers(root, set, get) {
   });
 }
 
-function summaryText(it) {
-  const n = units(it);
-  if (!n) return "Gerade nichts da.";
+// What is there, everywhere or at one place.
+function summaryText(it, loc) {
+  const n = units(it, loc);
+  const opened = loc ? openedIn(it, loc) : it.opened;
+  const closed = loc ? it[loc] : total(it);
+  if (!n) return loc ? `Im ${LOC_NAME[loc]} gerade nichts da.` : "Gerade nichts da.";
+  const pre = loc ? `Im ${LOC_NAME[loc]}: ` : "";
   if (isFill(it)) {
-    const sum = total(it) + it.opened.reduce((a, o) => a + o.left, 0);
-    return it.opened.length ? `${n} ${unitNoun(it, n)}, zusammen etwa ${amount(sum)} volle` : `${n} volle ${unitNoun(it, n)}`;
+    const sum = closed + opened.reduce((a, o) => a + o.left, 0);
+    return pre + (opened.length ? `${n} ${unitNoun(it, n)}, zusammen etwa ${amount(sum)} volle` : `${n} volle ${unitNoun(it, n)}`);
   }
   if (isPieces(it)) {
-    const pcs = total(it) * it.pack.size + it.opened.reduce((a, o) => a + o.left, 0);
-    return `${pcs} Stück in ${n} ${unitNoun(it, n)}`;
+    const pcs = closed * it.pack.size + opened.reduce((a, o) => a + o.left, 0);
+    return pre + `${pcs} Stück in ${n} ${unitNoun(it, n)}`;
   }
-  return `${n} Stück`;
+  return pre + `${n} Stück`;
 }
 
 // Details of one item: stock per place with every opened bottle or pack, then settings.
-function itemSheet(id, keepScroll) {
+// With `focus` (opened from a place's tab) that place comes first and the other
+// place is only a small hint that can be tapped to switch over.
+function itemSheet(id, keepScroll, focus = null) {
   const it = byId(id); if (!it) return;
   const prev = $("#sheet .sheet");
   const prevScroll = keepScroll ? prev?.scrollTop : 0;
@@ -359,9 +370,14 @@ function itemSheet(id, keepScroll) {
       ${canOpen && it[l] > 0 ? `<button type="button" class="linkbtn" data-open="${l}">${isFill(it) ? "Eine Flasche anbrechen" : "Eine Packung anbrechen"}</button>` : ""}
     </section>`;
   };
+  const otherHint = l => {
+    const n = units(it, l);
+    return `<button type="button" class="otherloc ${n ? "" : "no"}" data-goto="${l}">
+      <i style="background:var(--${l})"></i><span>${LOC_NAME[l]} im Bestand: <b>${n ? "Ja" : "Nein"}</b>${n ? `, ${n} ${unitNoun(it, n)}` : ""}</span><span class="chev" aria-hidden="true">›</span></button>`;
+  };
   const s = openSheet(`
-    <div><h2 id="it-title">${esc(it.name)}</h2><div class="hint sumline">${esc(summaryText(it))}</div></div>
-    ${LOCS.map(locCard).join("")}
+    <div><h2 id="it-title">${esc(it.name)}</h2><div class="hint sumline">${esc(summaryText(it, focus))}</div></div>
+    ${focus ? locCard(focus) + LOCS.filter(l => l !== focus).map(otherHint).join("") : LOCS.map(locCard).join("")}
     <details class="more" ${moreOpen ? "open" : ""}><summary>Name, Rubrik und Zählweise ändern</summary>
       <div class="morebody">
         <div class="field"><label for="it-name">Name</label><input class="text" id="it-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
@@ -381,7 +397,7 @@ function itemSheet(id, keepScroll) {
     if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; $("#it-title", s).textContent = v; renderList(); }
   };
   nameEl.addEventListener("change", saveName);
-  const redraw = () => { saveName(); itemSheet(id, true); renderList(); };
+  const redraw = () => { saveName(); itemSheet(id, true, focus); renderList(); };
 
   wireSteppers(s, (key, n) => {
     const cur = byId(id); if (!cur) return n;
@@ -394,6 +410,14 @@ function itemSheet(id, keepScroll) {
     return key.startsWith("op-") ? cur.opened[Number(key.slice(3))]?.left ?? 0 : cur[key.slice(3)];
   });
   s.addEventListener("click", e => {
+    const go = e.target.closest("[data-goto]");
+    if (go) {
+      // switch the list behind to that place too
+      saveName();
+      state.view = state.scanLoc = go.dataset.goto; saveUi(); renderList();
+      itemSheet(id, false, go.dataset.goto);
+      return;
+    }
     const ob = e.target.closest("[data-open]");
     if (ob) { openPack(byId(id), ob.dataset.open); redraw(); return; }
     const fb = e.target.closest(".fillseg [data-v]");
@@ -421,7 +445,7 @@ function itemSheet(id, keepScroll) {
     const cur = byId(id);
     const c = openSheet(`<h2>${esc(cur.name)} löschen?</h2><div class="hint">Der Artikel verschwindet auf beiden Handys, aus Keller und Außenlager.</div>
       <div class="btnrow"><button class="btn ghost" id="d-no">Behalten</button><button class="btn danger" id="d-yes">Löschen</button></div>`);
-    $("#d-no", c).onclick = () => itemSheet(id);
+    $("#d-no", c).onclick = () => itemSheet(id, false, focus);
     $("#d-yes", c).onclick = () => { store.remove(id); closeSheet(); toast(`${cur.name} gelöscht`); };
   };
 }
@@ -486,7 +510,7 @@ function renderShell() {
       bump(it, state.view, d); renderList();
       return;
     }
-    if (e.target.closest(".txt")) itemSheet(id);
+    if (e.target.closest(".txt")) itemSheet(id, false, state.view === "alle" ? null : state.view);
   });
   list.addEventListener("focusin", e => { if (e.target.matches(".stepper input")) e.target.select(); });
   list.addEventListener("change", e => {
