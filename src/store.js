@@ -30,8 +30,11 @@ function normalize(id, d) {
     cat: d.cat || null,
     // how the item is counted: "count" (whole items), "pieces" (packs of `size`), "fill" (bottles)
     pack: d.pack && ["count", "pieces", "fill"].includes(d.pack.mode) ? { mode: d.pack.mode, size: Number(d.pack.size) || 0 } : { mode: "count", size: 0 },
-    // one opened pack: {loc, left} with left = pieces, or a fill level 0.25..1
-    open: d.open && LOCS.includes(d.open.loc) && d.open.left > 0 ? { loc: d.open.loc, left: Number(d.open.left) } : null,
+    // opened packs or bottles: [{loc, left}] with left = pieces, or a fill level 0.25..1
+    // (older data had a single `open` object)
+    opened: (Array.isArray(d.opened) ? d.opened : d.open ? [d.open] : [])
+      .filter(o => o && LOCS.includes(o.loc) && Number(o.left) > 0)
+      .map(o => ({ loc: o.loc, left: Number(o.left) })),
   };
 }
 
@@ -71,7 +74,7 @@ export class FirebaseStore {
     const ref = doc(this.col);
     setDoc(ref, {
       name: data.name, eans: data.eans || [], locs: initialLocs(data),
-      cat: data.cat || null, pack: data.pack || { mode: "count", size: 0 }, open: null,
+      cat: data.cat || null, pack: data.pack || { mode: "count", size: 0 }, opened: [],
       keller: data.keller || 0, aussen: data.aussen || 0,
       createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
     }).catch(reportWriteError);
@@ -109,14 +112,15 @@ export class LocalStore {
   seed() {
     const ex = [
       ["Passierte Tomaten 500 g", 4, 0, "konserven"], ["Spaghetti 500 g", 2, 3, "nudeln"],
-      ["Rotwein Primitivo 0,75 l", 0, 6, "alkohol", { mode: "fill" }, { loc: "aussen", left: 0.5 }],
+      ["Rotwein Primitivo 0,75 l", 0, 6, "alkohol", { mode: "fill" }, [{ loc: "aussen", left: 0.5 }]],
+      ["Havana Club Rum 0,7 l", 2, 0, "alkohol", { mode: "fill" }, [{ loc: "keller", left: 0.25 }, { loc: "keller", left: 0.5 }, { loc: "keller", left: 0.75 }]],
       ["Kokosmilch 400 ml", 0, 0, "konserven"],
       ["Abenstaler Quelle Mineralwasser naturell 0,7 l", 3, 1, "getraenke"],
-      ["Kinder Country 9 Riegel", 2, 0, "suesses", { mode: "pieces", size: 9 }, { loc: "keller", left: 5 }],
+      ["Kinder Country 9 Riegel", 2, 0, "suesses", { mode: "pieces", size: 9 }, [{ loc: "keller", left: 5 }]],
       ["Spülmaschinen-Tabs", 1, 0, null],
     ];
-    ex.forEach(([name, keller, aussen, cat, pack, open], i) => this.items.set("demo" + i, normalize("demo" + i, {
-      name, eans: i === 4 ? ["4020655033006"] : [], keller, aussen, locs: initialLocs({ keller, aussen }), cat, pack, open,
+    ex.forEach(([name, keller, aussen, cat, pack, opened], i) => this.items.set("demo" + i, normalize("demo" + i, {
+      name, eans: name.startsWith("Abenstaler") ? ["4020655033006"] : [], keller, aussen, locs: initialLocs({ keller, aussen }), cat, pack, opened,
     })));
   }
   onAuth(cb) { setTimeout(() => cb({ email: "demo" }), 0); return () => {}; }

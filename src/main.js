@@ -4,6 +4,7 @@ import { Scanner, beep, unlockAudio } from "./scanner.js";
 import { GROUPS, CATS, CAT, suggestCategory, suggestPack } from "./categories.js";
 
 const LOC_NAME = { keller: "Keller", aussen: "Außenlager" };
+const LOC_SHORT = { keller: "Keller", aussen: "Außen" };
 
 const cfg = window.VK_CONFIG || {};
 const demo = !cfg.firebase?.apiKey;
@@ -20,6 +21,7 @@ const state = {
   scanLoc: ui.scanLoc || "keller",
   scanDir: "in",
   collapsed: new Set(ui.collapsed || []),
+  hideEmpty: ui.hideEmpty !== false,
 };
 
 // ---------- helpers ----------
@@ -28,7 +30,10 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const norm = s => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/ß/g, "ss");
 const words = s => norm(s).split(/[^a-z0-9]+/).filter(w => w.length > 1);
 const total = it => it.keller + it.aussen;
-const inStock = (it, loc) => loc ? it[loc] > 0 || it.open?.loc === loc : total(it) > 0 || !!it.open;
+const openedIn = (it, loc) => it.opened.filter(o => o.loc === loc);
+// Whole units at a place (or everywhere): closed ones plus opened ones.
+const units = (it, loc) => loc ? it[loc] + openedIn(it, loc).length : total(it) + it.opened.length;
+const inStock = (it, loc) => units(it, loc) > 0;
 const byId = id => state.items.find(it => it.id === id);
 const byEan = ean => state.items.find(it => it.eans.includes(ean));
 const isPieces = it => it.pack.mode === "pieces" && it.pack.size > 1;
@@ -36,7 +41,7 @@ const isFill = it => it.pack.mode === "fill";
 
 function loadUi() { try { return JSON.parse(localStorage.getItem("vk-ui") || "{}"); } catch { return {}; } }
 function saveUi() {
-  try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc, collapsed: [...state.collapsed] })); } catch {}
+  try { localStorage.setItem("vk-ui", JSON.stringify({ scanLoc: state.scanLoc, collapsed: [...state.collapsed], hideEmpty: state.hideEmpty })); } catch {}
 }
 
 // Items whose names share most words with `name`: used to stop duplicates.
@@ -59,22 +64,34 @@ function similar(name, exceptId) {
 }
 
 const FILL_STEPS = [0.25, 0.5, 0.75, 1];
-function fillLabel(v) { return v >= 1 ? "voll" : v >= 0.75 ? "¾ voll" : v >= 0.5 ? "halb voll" : "¼ voll"; }
-function openLabel(it) {
-  if (!it.open) return "";
-  return isFill(it) ? `angebrochen, ${fillLabel(it.open.left)}` : `angebrochen, noch ${it.open.left} Stück`;
+const FRAC = { 0.25: "¼", 0.5: "½", 0.75: "¾" };
+function fillShort(v) { return v >= 1 ? "voll" : FRAC[v] || "¼"; }
+// 3.5 -> "3½", 0.25 -> "¼"
+function amount(x) {
+  const q = Math.round(x * 4) / 4, w = Math.floor(q), f = FRAC[q - w] || "";
+  return (w || !f ? String(w) : "") + f;
 }
 function packNoun(it, n) {
   if (isPieces(it)) return n === 1 ? "Packung" : "Packungen";
   if (isFill(it)) return n === 1 ? "Flasche" : "Flaschen";
   return "";
 }
+const unitNoun = (it, n) => packNoun(it, n) || "Stück";
 
-function whereHtml(it, skip) {
-  const parts = LOCS.filter(l => l !== skip && it[l] > 0)
-    .map(l => `<span class="where ${l}"><i></i><b>${it[l]}×</b> ${LOC_NAME[l]}</span>`);
-  if (it.open && it.open.loc !== skip) parts.push(`<span class="where ${it.open.loc} opened"><i></i>${esc(openLabel(it))}</span>`);
-  return parts.join("");
+// Small badges for the opened packs or bottles at a place, emptiest first.
+function pillsHtml(it, loc) {
+  return openedIn(it, loc).sort((a, b) => a.left - b.left)
+    .map(o => `<span class="pill">${isFill(it) ? fillShort(o.left) : `${o.left} St.`}</span>`).join("");
+}
+function whereHtml(it) {
+  return LOCS.filter(l => inStock(it, l)).map(l =>
+    `<span class="where ${l}"><i></i>${LOC_SHORT[l]}${it[l] ? ` <b>${it[l]}</b>` : ""}${pillsHtml(it, l)}</span>`).join("");
+}
+function bottleHtml(v) {
+  return `<span class="bottle" aria-hidden="true"><span style="height:${Math.round(v * 100)}%"></span></span>`;
+}
+function fillSegHtml(i, v) {
+  return `<div class="seg fillseg" data-i="${i}">${FILL_STEPS.map(f => `<button type="button" data-v="${f}" aria-pressed="${v === f}">${fillShort(f)}</button>`).join("")}<button type="button" data-v="0" class="leer">leer</button></div>`;
 }
 
 let toastTimer;
@@ -106,28 +123,39 @@ function bump(it, loc, d) {
   store.bump(it.id, loc, d);
   it[loc] += d;
 }
-function setOpen(it, open) {
-  it.open = open;
-  store.update(it.id, { open });
+function setOpened(it, opened) {
+  it.opened = opened;
+  store.update(it.id, { opened, open: null });
 }
-// Take a closed pack and make it the opened one.
+// Change what is left in opened pack i; 0 means it is empty and gone.
+function setLeft(it, i, left) {
+  const next = it.opened.map(o => ({ ...o }));
+  if (!next[i]) return;
+  if (left > 0) next[i].left = left; else next.splice(i, 1);
+  setOpened(it, next);
+}
+// Take a closed pack or bottle and open it.
 function openPack(it, loc) {
   if (it[loc] <= 0) return false;
   bump(it, loc, -1);
-  setOpen(it, { loc, left: isPieces(it) ? it.pack.size : 1 });
+  setOpened(it, [...it.opened, { loc, left: isPieces(it) ? it.pack.size : 1 }]);
   return true;
 }
-// One piece out: from the opened pack, opening a new one if needed.
+// One piece out: from the emptiest opened pack at that place, or open a new one.
 function takePiece(it, loc) {
-  if (!it.open && !openPack(it, loc)) return false;
-  const left = it.open.left - 1;
-  setOpen(it, left > 0 ? { ...it.open, left } : null);
+  let i = -1;
+  it.opened.forEach((o, k) => { if (o.loc === loc && (i < 0 || o.left < it.opened[i].left)) i = k; });
+  if (i < 0) {
+    if (!openPack(it, loc)) return false;
+    i = it.opened.length - 1;
+  }
+  setLeft(it, i, it.opened[i].left - 1);
   return true;
 }
-const snapshot = it => ({ keller: it.keller, aussen: it.aussen, open: it.open ? { ...it.open } : null });
+const snapshot = it => ({ keller: it.keller, aussen: it.aussen, opened: it.opened.map(o => ({ ...o })) });
 function restore(it, snap) {
   for (const l of LOCS) bump(it, l, snap[l] - it[l]);
-  setOpen(it, snap.open);
+  setOpened(it, snap.opened.map(o => ({ ...o })));
 }
 
 // ---------- sheets ----------
@@ -298,55 +326,79 @@ function wireSteppers(root, set, get) {
   });
 }
 
-// The opened pack of an item: pieces left, or fill level.
-function openBlockHtml(it) {
-  if (it.pack.mode === "count" || (it.pack.mode === "pieces" && !isPieces(it))) return "";
-  const noun = isFill(it) ? "Flasche" : "Packung";
-  if (!it.open) {
-    const from = LOCS.find(l => it[l] > 0);
-    return `<div class="field"><span class="label">Angebrochen</span>
-      ${from ? `<button class="btn ghost small" id="op-open" data-loc="${from}">${noun} im ${LOC_NAME[from]} anbrechen</button>`
-             : `<span class="hint">Keine ${noun} da, die man anbrechen könnte.</span>`}</div>`;
+function summaryText(it) {
+  const n = units(it);
+  if (!n) return "Gerade nichts da.";
+  if (isFill(it)) {
+    const sum = total(it) + it.opened.reduce((a, o) => a + o.left, 0);
+    return it.opened.length ? `${n} ${unitNoun(it, n)}, zusammen etwa ${amount(sum)} volle` : `${n} volle ${unitNoun(it, n)}`;
   }
-  const body = isFill(it)
-    ? `<div class="seg" id="op-fill">${FILL_STEPS.map(v => `<button type="button" data-v="${v}" aria-pressed="${it.open.left === v}">${v === 1 ? "voll" : v === 0.75 ? "¾" : v === 0.5 ? "½" : "¼"}</button>`).join("")}</div>`
-    : `<div class="locline"><span>Noch drin</span>${stepperHtml("op-left", it.open.left)}</div>`;
-  return `<div class="field"><span class="label">Angebrochen im ${LOC_NAME[it.open.loc]}</span>${body}
-    <button class="linkbtn" id="op-empty">${noun} ist leer, weg damit</button></div>`;
+  if (isPieces(it)) {
+    const pcs = total(it) * it.pack.size + it.opened.reduce((a, o) => a + o.left, 0);
+    return `${pcs} Stück in ${n} ${unitNoun(it, n)}`;
+  }
+  return `${n} Stück`;
 }
 
-// Details of one item: counts, category, pack, opened pack, barcodes, delete.
+// Details of one item: stock per place with every opened bottle or pack, then settings.
 function itemSheet(id, keepScroll) {
   const it = byId(id); if (!it) return;
-  const prevScroll = keepScroll ? $("#sheet .sheet")?.scrollTop : 0;
+  const prev = $("#sheet .sheet");
+  const prevScroll = keepScroll ? prev?.scrollTop : 0;
+  const moreOpen = keepScroll && !!$("details.more", prev || document)?.open;
+  const canOpen = isFill(it) || isPieces(it);
+  const closedLabel = isFill(it) ? "Volle Flaschen" : isPieces(it) ? "Geschlossene Packungen" : "Anzahl";
+  const locCard = l => {
+    const rows = it.opened.map((o, i) => o.loc !== l ? "" : isFill(it)
+      ? `<div class="orow">${bottleHtml(o.left)}${fillSegHtml(i, o.left)}</div>`
+      : `<div class="orow"><span class="olabel">Angebrochen, noch Stück</span>${stepperHtml("op-" + i, o.left)}</div>`).join("");
+    return `<section class="loccard">
+      <div class="lochead"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}</span></div>
+      <div class="locline"><span>${closedLabel}</span>${stepperHtml("it-" + l, it[l])}</div>
+      ${rows ? `<div class="olist"><span class="label">Angebrochen</span>${rows}</div>` : ""}
+      ${canOpen && it[l] > 0 ? `<button type="button" class="linkbtn" data-open="${l}">${isFill(it) ? "Eine Flasche anbrechen" : "Eine Packung anbrechen"}</button>` : ""}
+    </section>`;
+  };
   const s = openSheet(`
-    <div class="field"><label for="it-name">Name</label><input class="text" id="it-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
-    ${LOCS.map(l => `<div class="locline"><span class="locname"><i style="background:var(--${l})"></i>${LOC_NAME[l]}${packNoun(it, 2) ? ` <span class="hint">(${packNoun(it, 2)})</span>` : ""}</span>${stepperHtml("it-" + l, it[l])}</div>`).join("")}
-    ${openBlockHtml(it)}
-    <div class="field"><label for="it-cat">Rubrik</label>${catSelectHtml("it-cat", it.cat)}</div>
-    ${packFieldHtml("it", { ...it.pack })}
-    <div class="field"><span class="label">Barcodes</span>
-      <div class="chips">${it.eans.length ? it.eans.map(e => `<span class="chip">${esc(e)}</span>`).join("") : `<span class="hint">Noch keiner. Scanne den Artikel und wähle ihn bei „Schon vorhanden?“ aus.</span>`}</div></div>
+    <div><h2 id="it-title">${esc(it.name)}</h2><div class="hint sumline">${esc(summaryText(it))}</div></div>
+    ${LOCS.map(locCard).join("")}
+    <details class="more" ${moreOpen ? "open" : ""}><summary>Name, Rubrik und Zählweise ändern</summary>
+      <div class="morebody">
+        <div class="field"><label for="it-name">Name</label><input class="text" id="it-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
+        <div class="field"><label for="it-cat">Rubrik</label>${catSelectHtml("it-cat", it.cat)}</div>
+        ${packFieldHtml("it", { ...it.pack })}
+        <div class="field"><span class="label">Barcodes</span>
+          <div class="chips">${it.eans.length ? it.eans.map(e => `<span class="chip">${esc(e)}</span>`).join("") : `<span class="hint">Noch keiner. Scanne den Artikel und wähle ihn bei „Schon vorhanden?“ aus.</span>`}</div></div>
+        <button class="linkbtn danger" id="it-del">Artikel löschen</button>
+      </div>
+    </details>
     <button class="btn primary" id="it-done">Fertig</button>
-    <button class="linkbtn danger" id="it-del">Artikel löschen</button>
   `);
   if (prevScroll) s.scrollTop = prevScroll;
   const nameEl = $("#it-name", s);
-  const saveName = () => { const v = nameEl.value.trim(); const cur = byId(id); if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; } };
+  const saveName = () => {
+    const v = nameEl.value.trim(), cur = byId(id);
+    if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; $("#it-title", s).textContent = v; renderList(); }
+  };
   nameEl.addEventListener("change", saveName);
   const redraw = () => { saveName(); itemSheet(id, true); renderList(); };
 
   wireSteppers(s, (key, n) => {
     const cur = byId(id); if (!cur) return n;
-    if (key === "op-left") {
-      setOpen(cur, n > 0 ? { ...cur.open, left: n } : null);
-      if (!n) redraw();
-      return n;
-    }
-    bump(cur, key.slice(3), n - cur[key.slice(3)]);
-    renderList();
+    if (key.startsWith("op-")) setLeft(cur, Number(key.slice(3)), Math.min(n, cur.pack.size || n));
+    else bump(cur, key.slice(3), n - cur[key.slice(3)]);
+    redraw();
     return n;
-  }, key => key === "op-left" ? byId(id)?.open?.left ?? 0 : byId(id)?.[key.slice(3)] ?? 0);
+  }, key => {
+    const cur = byId(id); if (!cur) return 0;
+    return key.startsWith("op-") ? cur.opened[Number(key.slice(3))]?.left ?? 0 : cur[key.slice(3)];
+  });
+  s.addEventListener("click", e => {
+    const ob = e.target.closest("[data-open]");
+    if (ob) { openPack(byId(id), ob.dataset.open); redraw(); return; }
+    const fb = e.target.closest(".fillseg [data-v]");
+    if (fb) { setLeft(byId(id), Number(fb.closest(".fillseg").dataset.i), Number(fb.dataset.v)); redraw(); }
+  });
 
   $("#it-cat", s).addEventListener("change", e => { const cur = byId(id); cur.cat = e.target.value || null; store.update(id, { cat: cur.cat }); renderList(); });
   const pack = { ...it.pack };
@@ -355,17 +407,14 @@ function itemSheet(id, keepScroll) {
     const next = { mode: pack.mode, size: pack.mode === "pieces" ? pack.size : 0 };
     const changedKind = next.mode !== cur.pack.mode;
     cur.pack = next;
-    const patch = { pack: next };
-    if (changedKind && cur.open) { cur.open = null; patch.open = null; }
-    store.update(id, patch);
+    store.update(id, { pack: next });
+    if (changedKind && cur.opened.length) {
+      // Opened ones count as whole ones again, so nothing gets lost.
+      for (const l of LOCS) bump(cur, l, openedIn(cur, l).length);
+      setOpened(cur, []);
+    }
     if (changedKind || next.mode === "pieces") redraw();
   });
-  const op = $("#op-open", s);
-  if (op) op.onclick = () => { openPack(byId(id), op.dataset.loc); redraw(); };
-  const fill = $("#op-fill", s);
-  if (fill) fill.onclick = e => { const b = e.target.closest("[data-v]"); if (!b) return; const cur = byId(id); setOpen(cur, { ...cur.open, left: Number(b.dataset.v) }); redraw(); };
-  const empty = $("#op-empty", s);
-  if (empty) empty.onclick = () => { setOpen(byId(id), null); redraw(); };
 
   $("#it-done", s).onclick = () => { saveName(); closeSheet(); };
   $("#it-del", s).onclick = () => {
@@ -395,6 +444,7 @@ function renderShell() {
           <button data-view="keller">Keller<span class="n" id="n-keller"></span></button>
           <button data-view="aussen">Außenlager<span class="n" id="n-aussen"></span></button>
         </div>
+        <div class="viewopts"><button class="toggle" id="hide"><span class="sw" aria-hidden="true"></span>Leere ausblenden</button></div>
       </header>
       <ul class="list" id="list"></ul>
       <div id="empty"></div>
@@ -417,6 +467,7 @@ function renderShell() {
   $("#add").onclick = () => newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
   $("#scan").onclick = () => { unlockAudio(); openScanner(); };
   $("#status").onclick = statusSheet;
+  $("#hide").onclick = () => { state.hideEmpty = !state.hideEmpty; saveUi(); renderList(); };
 
   const list = $("#list");
   list.addEventListener("click", e => {
@@ -446,6 +497,7 @@ function renderShell() {
     bump(it, state.view, n - it[state.view]); renderList();
   });
   $("#empty").addEventListener("click", e => {
+    if (e.target.closest("#show-empty")) { state.hideEmpty = false; saveUi(); renderList(); return; }
     if (e.target.closest("#add-q")) newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
   });
   window.addEventListener("online", () => { state.online = true; renderStatus(); });
@@ -470,42 +522,48 @@ function statusSheet() {
   if (!demo) $("#st-out", s).onclick = () => { closeSheet(); store.signOut(); };
 }
 
+// Items for the current tab and search. `hidden` counts the empty ones left out.
 function visibleItems() {
   const q = norm(state.query).trim();
-  let list = state.items;
+  const loc = state.view === "alle" ? null : state.view;
+  let list = state.items, hidden = 0;
   // A place shows what is there now, plus what used to be there (so you can count it back up).
-  if (state.view !== "alle") list = list.filter(it => inStock(it, state.view) || it.locs.includes(state.view));
+  if (loc) list = list.filter(it => inStock(it, loc) || it.locs.includes(loc));
   if (q) {
     const qs = q.split(/\s+/);
     list = list.filter(it => { const n = norm(it.name); return qs.every(w => n.includes(w)) || it.eans.includes(q); });
+  } else if (state.hideEmpty) {
+    const before = list.length;
+    list = list.filter(it => inStock(it, loc));
+    hidden = before - list.length;
   }
-  const key = it => inStock(it, state.view === "alle" ? null : state.view) ? 0 : 1;
-  return [...list].sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name, "de"));
+  const key = it => inStock(it, loc) ? 0 : 1;
+  return { list: [...list].sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name, "de")), hidden };
 }
 
 function rowHtml(it) {
-  if (state.view === "alle") {
-    const t = total(it);
-    const big = t ? t : it.open ? `<span class="out">Rest</span>` : "leer";
-    return `<li class="item" data-id="${it.id}">
-      <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub">${whereHtml(it) || `<span>Nichts mehr da</span>`}</span></button>
-      <div class="total ${t ? "" : "out"}">${big}</div></li>`;
+  const loc = state.view === "alle" ? null : state.view;
+  const cls = inStock(it, loc) ? "item" : "item none";
+  if (!loc) {
+    const n = units(it), where = whereHtml(it);
+    return `<li class="${cls}" data-id="${it.id}">
+      <button class="txt"><span class="name">${esc(it.name)}</span>${where ? `<span class="sub">${where}</span>` : ""}</button>
+      <div class="total ${n ? "" : "out"}">${n || "leer"}</div></li>`;
   }
-  const n = it[state.view], others = whereHtml(it, state.view);
-  const here = it.open?.loc === state.view ? `<span class="where ${state.view} opened"><i></i>${esc(openLabel(it))}</span>` : "";
-  const sub = [n || here ? "" : "<span>Hier leer</span>", here, others ? `<span>sonst ${others}</span>` : ""].join("");
-  return `<li class="item" data-id="${it.id}">
-    <button class="txt"><span class="name">${esc(it.name)}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>
-    ${stepperHtml("", n)}</li>`;
+  const pills = pillsHtml(it, loc);
+  return `<li class="${cls}" data-id="${it.id}">
+    <button class="txt"><span class="name">${esc(it.name)}</span>${pills ? `<span class="sub"><span class="where">+ angebrochen ${pills}</span></span>` : ""}</button>
+    ${stepperHtml("", it[loc])}</li>`;
 }
 
 function renderList() {
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
-  $("#n-alle").textContent = state.items.length || "";
-  for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l) || it.locs.includes(l)).length || "";
+  $("#n-alle").textContent = state.items.filter(it => inStock(it)).length || "";
+  for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l)).length || "";
   $("#qclear").hidden = !state.query;
+  $("#hide").setAttribute("aria-pressed", state.hideEmpty);
 
-  const list = visibleItems();
+  const { list, hidden } = visibleItems();
   // Group by Rubrik: Ohne Rubrik first (so it gets sorted), then Food, then Non-Food.
   const byCat = new Map();
   for (const it of list) {
@@ -519,7 +577,7 @@ function renderList() {
     const closed = !searching && state.collapsed.has(key || "none");
     const have = rows.filter(it => inStock(it, state.view === "alle" ? null : state.view)).length;
     return `<li class="cathead"><button data-cat="${key || "none"}" aria-expanded="${!closed}">
-        <span>${esc(title)}</span><span class="cnt">${have}${have !== rows.length ? ` / ${rows.length}` : ""}</span><span class="chev" aria-hidden="true">›</span></button></li>
+        <span>${esc(title)}</span><span class="cnt">${have || ""}</span><span class="chev" aria-hidden="true">›</span></button></li>
       ${closed ? "" : rows.map(rowHtml).join("")}`;
   };
   let html = section("", "Ohne Rubrik");
@@ -530,6 +588,7 @@ function renderList() {
   }
   $("#list").innerHTML = html;
 
+  const hiddenNote = hidden ? `<div class="hiddennote">${hidden} leere${hidden === 1 ? "r" : ""} Artikel ausgeblendet. <button class="linkbtn" id="show-empty">Anzeigen</button></div>` : "";
   let empty = "";
   if (state.loadError) empty = `<div class="empty"><strong>Da stimmt etwas nicht.</strong><span>${esc(state.loadError)}</span></div>`;
   else if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
@@ -537,10 +596,12 @@ function renderList() {
     empty = `<div class="empty"><strong>„${esc(state.query)}“ haben wir ${state.view === "alle" ? "nicht" : "nicht im " + LOC_NAME[state.view]}.</strong>
       <span>Also ab auf die Einkaufsliste. Oder doch da? Dann leg es an.</span>
       <button class="btn ghost small" id="add-q">„${esc(state.query)}“ anlegen</button></div>`;
+  } else if (!list.length && hidden) {
+    empty = `<div class="empty"><strong>${state.view === "alle" ? "Gerade ist nichts da." : "Im " + LOC_NAME[state.view] + " ist gerade nichts."}</strong>${hiddenNote}</div>`;
   } else if (!list.length) {
     empty = `<div class="empty"><strong>${state.view === "alle" ? "Noch nichts erfasst." : "Im " + LOC_NAME[state.view] + " ist noch nichts erfasst."}</strong>
       <span>Tippe auf „Scannen“ und halte die Kamera auf einen Barcode. Oder lege einen Artikel mit „Neu“ von Hand an.</span></div>`;
-  }
+  } else empty = hiddenNote;
   $("#empty").innerHTML = empty;
 }
 
@@ -626,12 +687,11 @@ function countScan(id) {
 
   if (state.scanDir === "in") {
     bump(it, loc, 1);
-    return showResult(id, { loc, text: `+1 ${packNoun(it, 1) || ""} rein`.replace("  ", " "), snap });
+    return showResult(id, { loc, text: `+1 ${unitNoun(it, 1)} rein`, snap });
   }
 
   // Raus. Where is something to take? Prefer the chosen place.
-  const opened = it.pack.mode !== "count" && it.open && (it.open.loc === loc || it[loc] === 0) ? it.open.loc : null;
-  const from = opened || (it[loc] > 0 ? loc : LOCS.find(l => it[l] > 0 || it.open?.loc === l));
+  const from = inStock(it, loc) ? loc : LOCS.find(l => inStock(it, l));
   if (!from) {
     beep(false);
     return showResult(id, { warning: `Laut App ist nirgends mehr ${esc(it.name)} da.` });
@@ -643,28 +703,37 @@ function countScan(id) {
     return showResult(id, { loc: from, text: "1 Stück raus", snap, note, wholeOption: true });
   }
   if (isFill(it)) {
-    // Taking a bottle out to pour from: it becomes (or stays) the opened one.
-    if (!it.open) openPack(it, from);
-    return showResult(id, { loc: it.open.loc, text: "angebrochen", snap, note, fillPicker: true, wholeOption: true });
+    // Pouring from a bottle: show the opened ones to set how full they are now.
+    // With none opened there yet, open one.
+    let text = "";
+    if (!openedIn(it, from).length) { openPack(it, from); text = "Flasche angebrochen"; }
+    return showResult(id, { loc: from, text, snap, note, fillPicker: true, wholeOption: true });
   }
   bump(it, from, -1);
   showResult(id, { loc: from, text: "−1 raus", neg: true, snap, note });
 }
 
 // The card at the bottom of the scanner: what just happened, with ways to correct it.
-function showResult(id, { loc, text, neg, snap, note, warning, fillPicker, wholeOption } = {}) {
+function showResult(id, opts = {}) {
+  let { loc, text, neg, snap, note, warning, fillPicker, wholeOption } = opts;
   const it = byId(id); const card = $("#sc-card"); if (!it || !card) return;
   loc = loc || state.scanLoc;
-  const openLine = it.open ? `<div class="hint">${esc(openLabel(it))} (${LOC_NAME[it.open.loc]})</div>` : "";
+  const opened = it.opened.map((o, i) => ({ o, i })).filter(x => x.o.loc === loc);
+  const pills = pillsHtml(it, loc);
+  const canWhole = wholeOption && snap && snap.keller + snap.aussen > 0;
   card.innerHTML = `
     <div class="head"><div style="min-width:0"><div class="name">${esc(it.name)}</div>
-      <div class="hint">${LOC_NAME[loc]}${text ? ` · <span class="delta ${neg || /raus|angebrochen/.test(text) ? "neg" : ""}">${esc(text)}</span>` : ""}</div>${openLine}</div>
-      <div class="big" aria-label="Volle ${packNoun(it, 2) || "Stück"} im ${LOC_NAME[loc]}">${it[loc]}</div></div>
+      <div class="hint">${LOC_NAME[loc]}${text ? ` · <span class="delta ${neg || /raus|angebrochen|weg/.test(text) ? "neg" : ""}">${esc(text)}</span>` : ""}</div>
+      ${pills && !fillPicker ? `<div class="hint">angebrochen ${pills}</div>` : ""}</div>
+      <div class="big" aria-label="Geschlossene ${unitNoun(it, 2)} im ${LOC_NAME[loc]}">${it[loc]}${it.pack.mode !== "count" ? `<small>${isFill(it) ? "voll" : "zu"}</small>` : ""}</div></div>
     ${note ? `<div class="warnbox">${note}</div>` : ""}
     ${warning ? `<div class="warnbox">${warning}</div>` : ""}
-    ${fillPicker && it.open ? `<div><div class="hint">Wie voll ist sie noch?</div><div class="seg" id="sc-fill">${FILL_STEPS.map(v => `<button type="button" data-v="${v}" aria-pressed="${it.open.left === v}">${v === 1 ? "voll" : v === 0.75 ? "¾" : v === 0.5 ? "½" : "¼"}</button>`).join("")}<button type="button" data-v="0">leer</button></div></div>` : ""}
+    ${fillPicker && opened.length ? `<div class="olist"><div class="hint">Wie voll ${opened.length > 1 ? "sind die angebrochenen" : "ist sie"} jetzt?</div>
+      ${opened.map(({ o, i }) => `<div class="orow">${bottleHtml(o.left)}${fillSegHtml(i, o.left)}</div>`).join("")}</div>` : ""}
+    ${fillPicker && it[loc] > 0 ? `<button type="button" class="linkbtn" id="sc-new">Noch eine Flasche anbrechen</button>` : ""}
     <div class="btnrow">
-      ${wholeOption ? `<button class="btn ghost small" id="sc-whole">Ganze ${packNoun(it, 1)} raus</button>`
+      ${canWhole ? `<button class="btn ghost small" id="sc-whole">Ganze ${packNoun(it, 1)} raus</button>`
+        : wholeOption ? `<span></span>`
         : `<div class="stepper" style="justify-self:start"><button type="button" data-d="-1" aria-label="Eins weniger" ${it[loc] ? "" : "disabled"}>−</button><button type="button" class="plus" data-d="1" aria-label="Eins mehr">+</button></div>`}
       ${snap ? `<button class="btn ghost small" id="sc-undo">Rückgängig</button>` : `<span></span>`}
     </div>`;
@@ -672,12 +741,17 @@ function showResult(id, { loc, text, neg, snap, note, warning, fillPicker, whole
     const cur = byId(id); bump(cur, loc, Number(b.dataset.d));
     showResult(id, { loc, text, neg, snap });
   });
-  const fill = $("#sc-fill", card);
-  if (fill) fill.onclick = e => {
-    const b = e.target.closest("[data-v]"); if (!b) return;
-    const cur = byId(id), v = Number(b.dataset.v);
-    setOpen(cur, v > 0 ? { ...cur.open, left: v } : null);
-    showResult(id, { loc, text: v > 0 ? `angebrochen, ${fillLabel(v)}` : "leer, weg damit", snap, fillPicker: v > 0, wholeOption });
+  card.onclick = e => {
+    const fb = e.target.closest(".fillseg [data-v]");
+    if (fb) {
+      const v = Number(fb.dataset.v);
+      setLeft(byId(id), Number(fb.closest(".fillseg").dataset.i), v);
+      return showResult(id, { ...opts, loc, text: v ? `jetzt ${fillShort(v)}` : "leere Flasche weg" });
+    }
+    if (e.target.closest("#sc-new")) {
+      openPack(byId(id), loc);
+      showResult(id, { ...opts, loc, text: "Flasche angebrochen" });
+    }
   };
   const whole = $("#sc-whole", card);
   if (whole) whole.onclick = () => {
