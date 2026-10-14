@@ -299,7 +299,7 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
   const stopAuto = () => { clearInterval(autoTimer); autoTimer = null; const a = $("#ni-auto", s); if (a) a.hidden = true; };
   const startAuto = () => {
     if (!ean || !nameEl.value.trim()) return;
-    stopAuto(); autoLeft = 6;
+    stopAuto(); autoLeft = 30;
     const a = $("#ni-auto", s);
     const tick = () => {
       if (!s.isConnected) return stopAuto();
