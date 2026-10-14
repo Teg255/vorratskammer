@@ -644,10 +644,11 @@ function renderList() {
 // ---------- scanner ----------
 let scanner = null;
 
-function openScanner() {
+// `hand`: opened by a Bluetooth hand scanner, so no camera is needed.
+function openScanner({ hand = false } = {}) {
   const host = $("#scanhost");
-  host.innerHTML = `<div class="scanner" role="dialog" aria-label="Barcode scannen">
-    <video muted playsinline></video>
+  host.innerHTML = `<div class="scanner ${hand ? "hand" : ""}" role="dialog" aria-label="Barcode scannen">
+    ${hand ? "" : `<video muted playsinline></video>`}
     <div class="top">
       <div class="row">
         <div class="seg dir" id="sc-dir"><button data-v="in">＋ Rein</button><button data-v="out">− Raus</button></div>
@@ -655,9 +656,10 @@ function openScanner() {
       </div>
       <div class="seg" id="sc-loc">${LOCS.map(l => `<button data-v="${l}">${LOC_NAME[l]}</button>`).join("")}</div>
     </div>
-    <div class="aim"><div id="sc-aim"></div></div>
-    <div class="msg" id="sc-msg"><span class="spinner"></span>&nbsp; Kamera startet …</div>
-    <div class="card" id="sc-card"><div class="hint">Halte den Barcode in den Rahmen. Gezählt wird automatisch.</div></div>
+    ${hand ? `<div class="handmsg"><strong>Handscanner bereit</strong><span>Scanne einfach los. Rein/Raus und das Lager wählst du oben oder mit den Steuer-Barcodes.</span></div>`
+      : `<div class="aim"><div id="sc-aim"></div></div>
+    <div class="msg" id="sc-msg"><span class="spinner"></span>&nbsp; Kamera startet …</div>`}
+    <div class="card" id="sc-card"><div class="hint">${hand ? "Jeder Scan wird sofort gezählt." : "Halte den Barcode in den Rahmen. Gezählt wird automatisch."}</div></div>
   </div>`;
   document.body.style.overflow = "hidden";
   document.body.classList.add("scanning");
@@ -666,6 +668,10 @@ function openScanner() {
   $("#sc-loc").onclick = e => { const b = e.target.closest("[data-v]"); if (!b) return; state.scanLoc = b.dataset.v; saveUi(); paintScanControls(); };
   $("#sc-close").onclick = closeScanner;
 
+  if (hand) {
+    scanner = { hand: true, paused: false, stop() {}, forget() {} };
+    return;
+  }
   scanner = new Scanner($("video", host), onScan);
   scanner.start().then(() => { $("#sc-msg").hidden = true; }).catch(err => {
     console.error(err);
@@ -714,6 +720,53 @@ async function onScan(code) {
     },
   });
   sheet.setProduct(await lookupProduct(code));
+}
+
+// ---------- hand scanner ----------
+// A Bluetooth barcode scanner acts like a keyboard: it types the code very fast and
+// presses Enter. Such bursts are caught anywhere in the app (outside text fields).
+const CONTROL = {
+  VKREIN: ["dir", "in", "Ab jetzt: Rein"], VKRAUS: ["dir", "out", "Ab jetzt: Raus"],
+  VKKELLER: ["loc", "keller", "Ab jetzt: Keller"], VKAUSSEN: ["loc", "aussen", "Ab jetzt: Außenlager"],
+};
+let kbBuf = "", kbLast = 0, kbTimer = null;
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest && e.target.closest("input, textarea, select")) return;
+  const now = performance.now();
+  if (now - kbLast > 100) kbBuf = "";
+  kbLast = now;
+  clearTimeout(kbTimer);
+  if (e.key === "Enter" || e.key === "Tab") {
+    if (kbBuf.length >= 4) { e.preventDefault(); handCode(kbBuf); }
+    kbBuf = "";
+    return;
+  }
+  if (e.key.length !== 1) return;
+  kbBuf += e.key;
+  if (kbBuf.length > 1) e.preventDefault();
+  // Scanners set to send no Enter: a pause ends the code.
+  kbTimer = setTimeout(() => { if (kbBuf.length >= 8) handCode(kbBuf); kbBuf = ""; }, 150);
+});
+
+function handCode(raw) {
+  if (!$("#list")) return; // not logged in yet
+  const code = raw.trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+  if (!code) return;
+  unlockAudio();
+  if ($("#sheet").innerHTML && !(scanner && scanner.paused)) closeSheet();
+  if (!scanner) openScanner({ hand: true });
+  const ctl = CONTROL[code];
+  if (ctl) {
+    if (ctl[0] === "dir") state.scanDir = ctl[1]; else { state.scanLoc = ctl[1]; saveUi(); }
+    paintScanControls();
+    beep(true);
+    const card = $("#sc-card");
+    if (card) card.innerHTML = `<div class="head"><div class="name">${ctl[2]}</div></div>`;
+    return;
+  }
+  if (scanner.paused) { beep(false); return; } // the new-item form is still open
+  onScan(code);
 }
 
 // Count a known item according to the Rein/Raus and place settings.

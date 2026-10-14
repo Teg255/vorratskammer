@@ -121,6 +121,9 @@ ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 /* scanner */
 .scanner{position:fixed;inset:0;z-index:20;background:#000;display:flex;flex-direction:column;color:#fff}
 .scanner video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.scanner.hand{background:#1b221e}
+.handmsg{position:relative;z-index:1;flex:1;display:grid;place-content:center;gap:10px;text-align:center;padding:24px;font-size:1rem;color:rgb(255 255 255 / .8)}
+.handmsg strong{font:700 1.4rem var(--font-round);color:#fff}
 .scanner .top{position:relative;z-index:2;padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 12px;display:grid;gap:8px;background:linear-gradient(rgb(0 0 0 / .7),rgb(0 0 0 / 0))}
 .scanner .top .row{display:flex;gap:8px;align-items:center}
 .scanner .top .seg{flex:1;background:rgb(255 255 255 / .16)}
