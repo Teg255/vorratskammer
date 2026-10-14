@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <title>Vorratskammer</title>
 <meta name="theme-color" content="#f2f4f1" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#121714" media="(prefers-color-scheme: dark)">
@@ -35,6 +35,7 @@
   color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0;background:var(--bg);overflow-x:hidden}
+*{touch-action:manipulation}
 body{color:var(--fg);font:17px/1.4 var(--font);-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 button,input{font:inherit;color:inherit}
 button{cursor:pointer}
@@ -105,6 +106,7 @@ ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .field>label,.label{font-size:.78rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 .text{height:50px;border:1px solid var(--line);border-radius:12px;padding:0 12px;background:var(--bg);font-size:1.05rem;width:100%}
 .btnrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.autosave{font-size:.88rem;color:var(--muted);text-align:center}
 .locline{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0}
 .locname{font-weight:600;display:flex;align-items:center;gap:8px}
 .locname i{width:10px;height:10px;border-radius:3px}

@@ -259,6 +259,7 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
     <details class="more"><summary>Packung mit Inhalt oder Füllstand?</summary>${packFieldHtml("ni", pack)}</details>
     ${ean ? `<div class="hint">Barcode ${esc(ean)} wird gemerkt. Beim nächsten Scan wird der Artikel sofort erkannt.</div>` : ""}
     <div class="btnrow"><button class="btn ghost" id="ni-cancel">Abbrechen</button><button class="btn primary" id="ni-save">Speichern</button></div>
+    ${ean ? `<div class="autosave" id="ni-auto" hidden></div>` : ""}
   `, () => onDone && onDone(null));
 
   const nameEl = $("#ni-name", s), catEl = $("#ni-cat", s);
@@ -292,9 +293,30 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
   wireSteppers(s, (key, v) => { counts[key.slice(3)] = v; return v; }, key => counts[key.slice(3)]);
   wirePackField(s, "ni", pack);
   $("#ni-cancel", s).onclick = closeSheet;
-  $("#ni-save", s).onclick = async () => {
+
+  // From a scan: save on its own after a few seconds unless someone touches the form.
+  let autoTimer = null, autoLeft = 0;
+  const stopAuto = () => { clearInterval(autoTimer); autoTimer = null; const a = $("#ni-auto", s); if (a) a.hidden = true; };
+  const startAuto = () => {
+    if (!ean || !nameEl.value.trim()) return;
+    stopAuto(); autoLeft = 6;
+    const a = $("#ni-auto", s);
+    const tick = () => {
+      if (!s.isConnected) return stopAuto();
+      if (autoLeft <= 0) { stopAuto(); save(); return; }
+      a.hidden = false;
+      a.textContent = `Wird in ${autoLeft} s automatisch gespeichert. Antippen zum Ändern.`;
+      autoLeft--;
+    };
+    tick(); autoTimer = setInterval(tick, 1000);
+  };
+  for (const ev of ["pointerdown", "keydown", "input"]) s.addEventListener(ev, e => { if (e.isTrusted && ev !== "keydown") stopAuto(); });
+  nameEl.addEventListener("keydown", stopAuto);
+
+  const save = async () => {
     const nm = nameEl.value.trim();
-    if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
+    if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return false; }
+    stopAuto();
     const id = await store.add({
       name: nm, eans: ean ? [ean] : [], keller: counts.keller, aussen: counts.aussen, home: loc,
       cat: catEl.value || null, pack: { mode: pack.mode, size: pack.mode === "pieces" ? pack.size : 0 },
@@ -302,8 +324,11 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
     const done = onDone; onDone = null;
     closeSheet();
     toast(`${nm} angelegt`);
-    done && done(id, false);
+    done && done(id, false, quiet);
+    return true;
   };
+  let quiet = false;
+  $("#ni-save", s).onclick = () => save();
   if (!ean) setTimeout(() => nameEl.focus(), 60);
   return {
     setProduct(h) {
@@ -315,8 +340,17 @@ function newItemSheet({ name = "", ean = null, loc = state.scanLoc, n = 1, looki
         Object.assign(pack, suggestPack(h.name));
       }
       suggest();
-      if (!h) nameEl.focus();
+      if (!h) nameEl.focus(); else startAuto();
     },
+    ean,
+    // Same barcode scanned again: one more.
+    addOne() {
+      const st = $(`.stepper[data-key="ni-${loc}"] .plus`, s);
+      if (st) st.click();
+      if (autoTimer) startAuto();
+    },
+    // Another barcode scanned: this one is fine as it is.
+    saveQuiet() { quiet = true; return save(); },
   };
 }
 
@@ -643,6 +677,7 @@ function renderList() {
 
 // ---------- scanner ----------
 let scanner = null;
+let pendingNew = null; // the new-item form a scan opened, while it is open
 
 // `hand`: opened by a Bluetooth hand scanner, so no camera is needed.
 function openScanner({ hand = false } = {}) {
@@ -712,13 +747,15 @@ async function onScan(code) {
   scanner.paused = true;
   const sheet = newItemSheet({
     ean: code, loc: state.scanLoc, n: state.scanDir === "in" ? 1 : 0, lookingUp: true,
-    onDone: (id, linked) => {
+    onDone: (id, linked, quiet) => {
+      if (pendingNew === sheet) pendingNew = null;
       if (!scanner) return;
       scanner.paused = false;
       if (id && linked) countScan(id);
-      else if (id) setTimeout(() => showResult(id, { text: "Neu angelegt" }), 300);
+      else if (id && !quiet) setTimeout(() => showResult(id, { text: "Neu angelegt" }), 300);
     },
   });
+  pendingNew = sheet;
   sheet.setProduct(await lookupProduct(code));
 }
 
@@ -765,7 +802,14 @@ function handCode(raw) {
     if (card) card.innerHTML = `<div class="head"><div class="name">${ctl[2]}</div></div>`;
     return;
   }
-  if (scanner.paused) { beep(false); return; } // the new-item form is still open
+  if (scanner.paused) {
+    // The new-item form is open: the same code counts one more, another code saves it first.
+    const f = pendingNew;
+    if (!f) { beep(false); return; }
+    if (f.ean === code) { if (state.scanDir === "in") f.addOne(); beep(true); return; }
+    f.saveQuiet().then(ok => { if (ok) onScan(code); else beep(false); });
+    return;
+  }
   onScan(code);
 }
 
