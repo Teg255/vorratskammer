@@ -18,7 +18,7 @@
   --bg:#f2f4f1; --surface:#ffffff; --sunk:#e6eae4; --line:#d5dbd2;
   --fg:#18201b; --muted:#5d6a61;
   --accent:#2c6a4c; --accent-fg:#ffffff; --accent-soft:#dcebe2;
-  --keller:#3d5a80; --aussen:#7a4a73;
+  --keller:#3d5a80; --aussen:#7a4a73; --kiste:#8a6a2f;
   --warn:#9a5b00; --warn-soft:#f6e7cf; --danger:#b3261e; --empty:#8f9a93;
   --shadow:0 1px 2px rgb(20 30 25 / .06),0 6px 20px rgb(20 30 25 / .08);
   --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
@@ -30,7 +30,7 @@
   --bg:#121714; --surface:#1b221e; --sunk:#232c27; --line:#2f3a33;
   --fg:#e7ede8; --muted:#9aa8a0;
   --accent:#6cc296; --accent-fg:#0d1a13; --accent-soft:#1f3529;
-  --keller:#8fb0db; --aussen:#d39ccb; --warn:#e3a54a; --warn-soft:#3a2d17; --danger:#ff8a80; --empty:#66736b;
+  --keller:#8fb0db; --aussen:#d39ccb; --kiste:#d8b56f; --warn:#e3a54a; --warn-soft:#3a2d17; --danger:#ff8a80; --empty:#66736b;
   --shadow:0 1px 2px rgb(0 0 0 / .3),0 6px 20px rgb(0 0 0 / .35);
   color-scheme:dark}}
 *{box-sizing:border-box}
@@ -54,8 +54,8 @@ h1{font:700 1.65rem/1.1 var(--font-round);letter-spacing:-.01em;margin:0}
 .search input{flex:1;min-width:0;border:0;background:none;outline:none;font-size:1.06rem;height:100%}
 .search input::-webkit-search-cancel-button{display:none}
 .iconbtn{border:0;background:none;color:var(--muted);padding:8px;font-size:1rem;line-height:1}
-.tabs{display:grid;grid-template-columns:repeat(3,1fr);background:var(--sunk);border-radius:12px;padding:3px;gap:3px}
-.tabs button{border:0;background:none;border-radius:9px;padding:9px 4px;font-weight:600;font-size:.93rem;color:var(--muted)}
+.tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--sunk);border-radius:12px;padding:3px;gap:3px}
+.tabs button{border:0;background:none;border-radius:9px;padding:9px 2px;font-weight:600;font-size:.9rem;white-space:nowrap;color:var(--muted)}
 .tabs button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
 .tabs .n{font:500 .75rem var(--num);margin-left:4px;opacity:.75}
 
@@ -66,7 +66,7 @@ ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .sub{font-size:.84rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:3px}
 .where{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px 5px;min-width:0}
 .where i{width:8px;height:8px;border-radius:2px;display:inline-block}
-.where.keller i{background:var(--keller)} .where.aussen i{background:var(--aussen)}
+.where.keller i{background:var(--keller)} .where.aussen i{background:var(--aussen)} .where.kiste i{background:var(--kiste)}
 .where b{font:700 .84rem var(--num);color:var(--fg)}
 .total{font:700 1.5rem/1 var(--num);min-width:2ch;text-align:right;padding-right:4px}
 .out{color:var(--empty);font:600 .74rem var(--font);text-transform:uppercase;letter-spacing:.06em}
@@ -203,6 +203,15 @@ details.more[open] summary{margin-bottom:10px}
 .login h1{font-size:2rem}
 .err{color:var(--danger);font-size:.92rem}
 .demo{background:var(--warn-soft);border-radius:12px;padding:10px 12px;font-size:.88rem;margin-bottom:10px}
+/* Kisten */
+@media (max-width:430px){.tabs .long{display:none}}
+.boxhead{display:grid;gap:2px;padding:2px 2px 4px}
+.boxhead .back{justify-self:start;border:0;background:none;color:var(--accent);font-weight:600;font-size:.95rem;padding:6px 0}
+.boxtitle{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.boxtitle h2{font:700 1.3rem/1.2 var(--font-round);margin:0;overflow-wrap:anywhere}
+.boxtitle .linkbtn{padding:4px 0;flex:none}
+.boxrow{border-left:5px solid var(--kiste)}
+.boxrow .chev{color:var(--muted);font-size:1.5rem;line-height:1;padding-right:6px}
 @media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition:none!important}}
 </style>
 </head>
