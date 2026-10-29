@@ -27,9 +27,12 @@ const KINDS = ["item", "box", "boxitem"];
 function normalize(id, d) {
   const kind = KINDS.includes(d.kind) ? d.kind : "item";
   if (kind !== "item") {
-    // photo: a small JPEG as data URL, so no extra storage service is needed
-    const photo = typeof d.photo === "string" && d.photo.startsWith("data:image/") ? d.photo : null;
-    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [], photo };
+    // photos: small JPEGs as data URLs, so no extra storage service is needed
+    // (the first version had a single `photo`)
+    const isImg = p => typeof p === "string" && p.startsWith("data:image/");
+    const photos = (Array.isArray(d.photos) ? d.photos : d.photo ? [d.photo] : []).filter(isImg);
+    // person: a name to note with it, e.g. who a present is for
+    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [], photos, person: String(d.person || "") };
   }
   return {
     id, kind,
