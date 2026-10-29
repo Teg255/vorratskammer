@@ -32,7 +32,9 @@ function normalize(id, d) {
     const isImg = p => typeof p === "string" && p.startsWith("data:image/");
     const photos = (Array.isArray(d.photos) ? d.photos : d.photo ? [d.photo] : []).filter(isImg);
     // person: a name to note with it, e.g. who a present is for
-    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [], photos, person: String(d.person || "") };
+    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [], photos, person: String(d.person || ""),
+      // where a Kiste itself is kept: "keller", "aussen" or not set
+      loc: LOCS.includes(d.loc) ? d.loc : null };
   }
   return {
     id, kind,
@@ -166,7 +168,7 @@ export class LocalStore {
     ex.forEach(([name, keller, aussen, cat, pack, opened], i) => this.items.set("demo" + i, normalize("demo" + i, {
       name, eans: name.startsWith("Abenstaler") ? ["4020655033006"] : [], keller, aussen, locs: initialLocs({ keller, aussen }), cat, pack, opened,
     })));
-    this.items.set("demob1", normalize("demob1", { kind: "box", name: "Weihnachtsdeko" }));
+    this.items.set("demob1", normalize("demob1", { kind: "box", name: "Weihnachtsdeko", loc: "aussen" }));
     this.items.set("demob2", normalize("demob2", { kind: "box", name: "Werkzeug" }));
     [["Lichterkette", 3, "demob1"], ["Christbaumkugeln rot", 24, "demob1"], ["Akkuschrauber", 1, "demob2"], ["Schrauben 4×40", 0, "demob2"]]
       .forEach(([name, n, box], i) => this.items.set("demobi" + i, normalize("demobi" + i, { kind: "boxitem", name, n, box })));

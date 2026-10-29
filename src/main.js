@@ -663,10 +663,9 @@ function rowHtml(it) {
 
 function renderList() {
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
-  const boxHave = state.boxItems.filter(it => it.n > 0).length;
-  $("#n-alle").textContent = (state.items.filter(it => inStock(it)).length + boxHave) || "";
+  $("#n-alle").textContent = state.items.filter(it => inStock(it)).length || "";
   for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l)).length || "";
-  $("#n-kisten").textContent = boxHave || "";
+  $("#n-kisten").textContent = state.boxes.length || "";
   $("#qclear").hidden = !state.query;
   $("#hide").setAttribute("aria-pressed", state.hideEmpty);
   $("#fill").setAttribute("aria-pressed", state.showFill);
@@ -697,8 +696,8 @@ function renderList() {
     if (!cats.length) continue;
     html += `<li class="grouphead">${g.name}</li>` + cats.map(c => section(c.id, c.name)).join("");
   }
-  // "Alle" also shows what is in the Kisten, so a search finds it there too.
-  const inBoxes = state.view === "alle" ? visibleBoxItems(state.boxItems) : [];
+  // What is in the Kisten shows up under "Alle" only when searching.
+  const inBoxes = state.view === "alle" && searching ? visibleBoxItems(state.boxItems) : [];
   if (inBoxes.length) {
     const closed = !searching && state.collapsed.has("kisten");
     html += `<li class="grouphead">Kisten</li><li class="cathead"><button data-cat="kisten" aria-expanded="${!closed}">
@@ -781,16 +780,18 @@ function renderKisten() {
   } else if (box) {
     const all = itemsIn(box.id), rows = visibleBoxItems(all);
     html = `<li class="boxhead"><button class="back" data-back>‹ Alle Kisten</button>
-        <div class="boxtitle"><h2>${esc(box.name)}</h2><button class="linkbtn" data-boxedit>Umbenennen</button></div></li>`
+        <div class="boxtitle"><h2>${esc(box.name)}</h2><button class="linkbtn" data-boxedit>Bearbeiten</button></div>
+        ${box.loc ? `<span class="sub"><span class="where ${box.loc}"><i></i>Steht im ${LOC_NAME[box.loc]}</span></span>` : ""}</li>`
       + rows.map(it => boxItemRowHtml(it, false)).join("");
     if (!all.length) empty = `<div class="empty"><strong>Die Kiste ist noch leer.</strong><span>Tippe auf „Neu“, um einzutragen, was drin ist.</span></div>`;
     else if (!rows.length) empty = `<div class="empty"><strong>In dieser Kiste ist gerade nichts.</strong><span>Leere Artikel sind ausgeblendet.</span></div>`;
   } else {
     html = [...state.boxes].sort(byName).map(b => {
-      const its = itemsIn(b.id), have = its.filter(it => it.n > 0).length;
+      const have = itemsIn(b.id).filter(it => it.n > 0).length;
       return `<li class="item boxrow" data-box="${b.id}">
         <button class="txt"><span class="name">${esc(b.name)}</span>
-          <span class="sub">${its.length ? `${have} von ${its.length} Artikeln da` : "noch leer"}</span></button>
+          ${b.loc ? `<span class="sub"><span class="where ${b.loc}"><i></i>${LOC_NAME[b.loc]}</span></span>` : ""}</button>
+        <div class="total ${have ? "" : "out"}">${have ? `${have}<small>Artikel</small>` : "leer"}</div>
         <span class="chev" aria-hidden="true">›</span></li>`;
     }).join("");
     if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
@@ -802,18 +803,36 @@ function renderKisten() {
   $("#empty").innerHTML = empty;
 }
 
+// Where a Kiste is kept. `null` = not set.
+function boxLocHtml(id, loc) {
+  return `<div class="field"><span class="label">Wo steht die Kiste?</span>
+    <div class="seg" id="${id}">${LOCS.map(l => `<button type="button" data-v="${l}" aria-pressed="${loc === l}">${LOC_NAME[l]}</button>`).join("")}</div></div>`;
+}
+function wireBoxLoc(root, id, get, set) {
+  $("#" + id, root).addEventListener("click", e => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    // tapping the chosen place again clears it
+    const v = get() === b.dataset.v ? null : b.dataset.v;
+    set(v);
+    root.querySelectorAll(`#${id} [data-v]`).forEach(x => x.setAttribute("aria-pressed", x.dataset.v === v));
+  });
+}
+
 function newBoxSheet() {
+  let loc = LOCS.includes(state.scanLoc) ? state.scanLoc : null;
   const s = openSheet(`<h2>Neue Kiste</h2>
     <div class="field"><label for="nb-name">Name der Kiste</label>
       <input class="text" id="nb-name" placeholder="z. B. Weihnachtsdeko" autocomplete="off" enterkeyhint="done"></div>
+    ${boxLocHtml("nb-loc", loc)}
     <div class="btnrow"><button class="btn ghost" id="nb-cancel">Abbrechen</button><button class="btn primary" id="nb-save">Anlegen</button></div>`);
   const nameEl = $("#nb-name", s);
+  wireBoxLoc(s, "nb-loc", () => loc, v => { loc = v; });
   const save = () => {
     const nm = nameEl.value.trim();
     if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
-    const id = store.put({ kind: "box", name: nm });
+    const id = store.put({ kind: "box", name: nm, loc });
     // show it right away, before the database answers
-    if (!boxById(id)) state.boxes.push({ id, kind: "box", name: nm, box: null, n: 0, eans: [] });
+    if (!boxById(id)) state.boxes.push({ id, kind: "box", name: nm, box: null, n: 0, eans: [], photos: [], person: "", loc });
     closeSheet();
     toast(`Kiste ${nm} angelegt`);
     openBox(id);
@@ -824,16 +843,21 @@ function newBoxSheet() {
   setTimeout(() => nameEl.focus(), 60);
 }
 
-// Rename or delete a Kiste.
+// Rename a Kiste, set where it is kept, or delete it.
 function boxSheet(id) {
   const b = boxById(id); if (!b) return;
   const n = itemsIn(id).length;
   const s = openSheet(`<h2>Kiste ${esc(b.name)}</h2>
     <div class="field"><label for="bx-name">Name der Kiste</label>
       <input class="text" id="bx-name" value="${esc(b.name)}" autocomplete="off" enterkeyhint="done"></div>
+    ${boxLocHtml("bx-loc", b.loc)}
     <button class="btn primary" id="bx-done">Fertig</button>
     <button class="linkbtn danger" id="bx-del">Kiste löschen</button>`);
   const nameEl = $("#bx-name", s);
+  wireBoxLoc(s, "bx-loc", () => boxById(id)?.loc ?? null, v => {
+    const cur = boxById(id); if (!cur) return;
+    cur.loc = v; store.update(id, { loc: v }); renderList();
+  });
   const saveName = () => {
     const v = nameEl.value.trim(), cur = boxById(id);
     if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; renderList(); }
