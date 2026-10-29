@@ -568,7 +568,7 @@ function renderShell() {
     const boxRow = e.target.closest("[data-box]");
     if (boxRow) { openBox(boxRow.dataset.box); return; }
     const ph = e.target.closest("[data-photo]");
-    if (ph) { const it = boxItemById(ph.dataset.photo); if (it?.photo) showPhoto(it.photo, it.name); return; }
+    if (ph) { const it = boxItemById(ph.dataset.photo); if (it?.photos.length) showPhotos(it.photos, 0, it.name); return; }
     const brow = e.target.closest("[data-bid]");
     if (brow) {
       const it = boxItemById(brow.dataset.bid); if (!it) return;
@@ -743,25 +743,27 @@ function visibleBoxItems(pool) {
   let list = pool;
   if (q) {
     const qs = q.split(/\s+/);
-    list = list.filter(it => { const n = norm(it.name + " " + (boxById(it.box)?.name || "")); return qs.every(w => n.includes(w)); });
+    list = list.filter(it => { const n = norm([it.name, it.person, boxById(it.box)?.name].join(" ")); return qs.every(w => n.includes(w)); });
   } else if (state.hideEmpty) list = list.filter(it => it.n > 0);
   return [...list].sort((a, b) => (b.n > 0) - (a.n > 0) || byName(a, b));
 }
 
 // `overview`: shown outside its Kiste, so with the Kiste's name and without + and −.
 function thumbHtml(it) {
-  return it.photo ? `<button type="button" class="thumb" data-photo="${it.id}" aria-label="Foto ansehen"><img src="${it.photo}" alt=""></button>` : "";
+  const k = it.photos.length;
+  return k ? `<button type="button" class="thumb" data-photo="${it.id}" aria-label="Fotos ansehen"><img src="${it.photos[0]}" alt="">${k > 1 ? `<span class="cnt">${k}</span>` : ""}</button>` : "";
 }
+const personHtml = it => it.person ? `<span class="where person">👤 ${esc(it.person)}</span>` : "";
 function boxItemRowHtml(it, overview) {
-  const cls = (it.n > 0 ? "item" : "item none") + (it.photo ? " withphoto" : "");
+  const cls = it.n > 0 ? "item" : "item none";
   if (overview) {
     const b = boxById(it.box);
     return `<li class="${cls}" data-bid="${it.id}">${thumbHtml(it)}
-      <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub"><span class="where kiste"><i></i>Kiste ${esc(b?.name || "?")}</span></span></button>
+      <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub"><span class="where kiste"><i></i>Kiste ${esc(b?.name || "?")}</span>${personHtml(it)}</span></button>
       <div class="total ${it.n ? "" : "out"}">${it.n || "leer"}</div></li>`;
   }
   return `<li class="${cls}" data-bid="${it.id}">${thumbHtml(it)}
-    <button class="txt"><span class="name">${esc(it.name)}</span></button>
+    <button class="txt"><span class="name">${esc(it.name)}</span>${it.person ? `<span class="sub">${personHtml(it)}</span>` : ""}</button>
     ${stepperHtml("", it.n)}</li>`;
 }
 
@@ -861,88 +863,121 @@ function boxSelectHtml(id, selected) {
 }
 
 // ---------- photos ----------
-// A photo is shrunk to a small JPEG (about 30 to 80 KB) and kept right in the article,
-// so it syncs to both phones without any extra setup.
-const PHOTO_MAX = 800;
+// Photos are shrunk to small JPEGs and kept right in the article, so they sync to both
+// phones without any extra setup. A Firestore entry holds at most 1 MB, hence the limits.
+const PHOTO_MAX = 800, PHOTO_LIMIT = 6, PHOTO_BUDGET = 900000;
 async function shrinkPhoto(file) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = fail; i.src = url; });
     let side = PHOTO_MAX, q = 0.7, out = "";
-    for (let tries = 0; tries < 4; tries++) {
+    for (let tries = 0; tries < 5; tries++) {
       const k = Math.min(1, side / Math.max(img.naturalWidth, img.naturalHeight));
       const c = document.createElement("canvas");
       c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
       out = c.toDataURL("image/jpeg", q);
-      if (out.length < 250000) break;
-      side *= 0.75; q -= 0.1;
+      if (out.length < 140000) break;
+      side *= 0.8; q = Math.max(0.4, q - 0.1);
     }
     return out;
   } finally { URL.revokeObjectURL(url); }
 }
+const photoBytes = list => list.reduce((a, p) => a + p.length, 0);
 
-// Photo picker inside a sheet. On the iPhone the file field offers "Foto aufnehmen" and the library.
-// `big`: the item's own sheet, with a larger picture.
-function photoField(host, get, set, title, big = false) {
+// Photos inside a sheet: a row of small pictures plus a tile to add more.
+// On the iPhone the file field offers "Foto aufnehmen" and the library; several can be picked at once.
+function photoField(host, get, set, title) {
+  const camera = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>`;
   const paint = () => {
-    const p = get();
-    host.innerHTML = p
-      ? `<div class="photofield ${big ? "big" : ""}"><button type="button" class="photo" data-act="view" aria-label="Foto vergrößern"><img src="${p}" alt=""></button>
-          <div class="photoacts"><label class="linkbtn">Anderes Foto<input type="file" accept="image/*" hidden></label>
-          <button type="button" class="linkbtn danger" data-act="del">Foto entfernen</button></div></div>`
-      : `<label class="btn ghost small photoadd"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-          Foto machen oder auswählen<input type="file" accept="image/*" hidden></label>`;
+    const ps = get();
+    const add = ps.length < PHOTO_LIMIT ? `<label class="photo addtile">${camera}<span>${ps.length ? "Weiteres Foto" : "Foto machen oder auswählen"}</span><input type="file" accept="image/*" multiple hidden></label>` : "";
+    host.innerHTML = `<div class="photostrip ${ps.length ? "" : "none"}">${ps.map((p, i) =>
+      `<button type="button" class="photo" data-i="${i}" aria-label="Foto ${i + 1} vergrößern"><img src="${p}" alt=""></button>`).join("")}${add}</div>`;
   };
   host.addEventListener("change", async e => {
-    const f = e.target.files && e.target.files[0]; if (!f) return;
-    host.innerHTML = `<div class="hint"><span class="spinner"></span>&nbsp; Foto wird vorbereitet …</div>`;
-    try { set(await shrinkPhoto(f)); }
-    catch (err) { console.error(err); toast("Das Foto ließ sich nicht öffnen. Bitte ein anderes versuchen."); }
+    const files = [...(e.target.files || [])]; if (!files.length) return;
+    host.insertAdjacentHTML("beforeend", `<div class="hint"><span class="spinner"></span>&nbsp; Foto wird vorbereitet …</div>`);
+    let list = [...get()], full = false;
+    for (const f of files) {
+      try {
+        const p = await shrinkPhoto(f);
+        if (list.length >= PHOTO_LIMIT || photoBytes(list) + p.length > PHOTO_BUDGET) { full = true; break; }
+        list.push(p);
+      } catch (err) { console.error(err); toast("Ein Foto ließ sich nicht öffnen. Bitte ein anderes versuchen."); }
+    }
+    set(list);
+    if (full) toast(`Mehr Fotos passen bei diesem Artikel nicht hinein (höchstens ${PHOTO_LIMIT}).`);
     paint();
   });
   host.addEventListener("click", e => {
-    const b = e.target.closest("[data-act]"); if (!b) return;
-    if (b.dataset.act === "view") showPhoto(get(), title());
-    if (b.dataset.act === "del") { set(null); paint(); }
+    const b = e.target.closest("[data-i]"); if (!b) return;
+    showPhotos(get(), Number(b.dataset.i), title(), i => { const l = [...get()]; l.splice(i, 1); set(l); paint(); });
   });
   paint();
 }
 
-// Full-screen photo. Tap to zoom in, drag to look around, ✕ or tap again to zoom out.
-function showPhoto(src, name) {
-  if (!src) return;
+// Full-screen photos. Tap to zoom in, drag to look around, tap again to zoom out.
+// Arrows or a swipe go to the next photo. With `onDelete` a photo can be removed here.
+function showPhotos(list, at, name, onDelete) {
+  if (!list.length) return;
   const host = $("#lightbox");
-  host.innerHTML = `<div class="lightbox" role="dialog" aria-label="Foto">
-    <div class="lbtop"><span>${esc(name || "")}</span><button type="button" class="close" aria-label="Schließen">✕</button></div>
-    <div class="lbimg"><img src="${src}" alt="${esc(name || "Foto")}"></div>
-    <div class="lbhint">Antippen zum Vergrößern</div></div>`;
-  const box = $(".lbimg", host), img = $("img", box);
-  $(".close", host).onclick = () => (host.innerHTML = "");
-  img.onclick = e => {
-    const zoomed = box.classList.toggle("zoom");
-    $(".lbhint", host).textContent = zoomed ? "Ziehen zum Verschieben, antippen zum Verkleinern" : "Antippen zum Vergrößern";
-    if (zoomed) {
-      // keep the tapped spot under the finger
-      const r = img.getBoundingClientRect();
-      const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
-      requestAnimationFrame(() => {
-        box.scrollLeft = fx * box.scrollWidth - box.clientWidth / 2;
-        box.scrollTop = fy * box.scrollHeight - box.clientHeight / 2;
-      });
-    }
+  let i = Math.max(0, Math.min(at, list.length - 1));
+  const close = () => (host.innerHTML = "");
+  const paint = () => {
+    const many = list.length > 1;
+    host.innerHTML = `<div class="lightbox" role="dialog" aria-label="Foto">
+      <div class="lbtop"><span>${esc(name || "")}${many ? ` <small>${i + 1} von ${list.length}</small>` : ""}</span><button type="button" class="close" aria-label="Schließen">✕</button></div>
+      <div class="lbimg"><img src="${list[i]}" alt="${esc(name || "Foto")}"></div>
+      ${many ? `<button type="button" class="lbnav prev" aria-label="Voriges Foto">‹</button><button type="button" class="lbnav next" aria-label="Nächstes Foto">›</button>` : ""}
+      <div class="lbbottom"><span class="lbhint">Antippen zum Vergrößern</span>${onDelete ? `<button type="button" class="linkbtn danger" id="lb-del">Foto löschen</button>` : ""}</div></div>`;
+    const box = $(".lbimg", host), img = $("img", box);
+    $(".close", host).onclick = close;
+    const go = d => { i = (i + d + list.length) % list.length; paint(); };
+    if (many) { $(".prev", host).onclick = () => go(-1); $(".next", host).onclick = () => go(1); }
+    let x0 = null;
+    box.addEventListener("touchstart", e => { x0 = box.classList.contains("zoom") ? null : e.touches[0].clientX; }, { passive: true });
+    box.addEventListener("touchend", e => {
+      if (x0 === null || !many) return;
+      const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+    });
+    img.onclick = e => {
+      const zoomed = box.classList.toggle("zoom");
+      $(".lbhint", host).textContent = zoomed ? "Ziehen zum Verschieben, antippen zum Verkleinern" : "Antippen zum Vergrößern";
+      if (zoomed) {
+        // keep the tapped spot under the finger
+        const r = img.getBoundingClientRect();
+        const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+        requestAnimationFrame(() => {
+          box.scrollLeft = fx * box.scrollWidth - box.clientWidth / 2;
+          box.scrollTop = fy * box.scrollHeight - box.clientHeight / 2;
+        });
+      }
+    };
+    const del = $("#lb-del", host);
+    if (del) del.onclick = () => {
+      const k = i;
+      list = list.filter((_, j) => j !== k);
+      onDelete(k);
+      if (!list.length) return close();
+      i = Math.min(i, list.length - 1); paint();
+    };
   };
+  paint();
 }
 
 function newBoxItemSheet({ name = "", box }) {
-  let n = 1, photo = null;
+  let n = 1, photos = [];
   const s = openSheet(`<h2>In die Kiste</h2>
     <div class="field"><label for="nbi-name">Was ist drin?</label>
       <input class="text" id="nbi-name" value="${esc(name)}" placeholder="z. B. Lichterkette" autocomplete="off" enterkeyhint="done"></div>
     <div class="suggest" id="nbi-sim"></div>
     <div class="field"><label for="nbi-box">Kiste</label>${boxSelectHtml("nbi-box", box)}</div>
     <div class="locline"><span class="locname">Wie viele?</span>${stepperHtml("nbi-n", n)}</div>
-    <div class="field"><span class="label">Foto</span><div id="nbi-photo"></div></div>
+    <div class="field"><label for="nbi-person">Person <span class="opt">(wenn wichtig)</span></label>
+      <input class="text" id="nbi-person" placeholder="z. B. für wen das Geschenk ist" autocomplete="off" enterkeyhint="done"></div>
+    <div class="field"><span class="label">Fotos</span><div id="nbi-photo"></div></div>
     <div class="btnrow"><button class="btn ghost" id="nbi-cancel">Abbrechen</button><button class="btn primary" id="nbi-save">Speichern</button></div>`);
   const nameEl = $("#nbi-name", s), boxEl = $("#nbi-box", s);
   const showSimilar = () => {
@@ -957,12 +992,13 @@ function newBoxItemSheet({ name = "", box }) {
     const b = e.target.closest("[data-id]"); if (b) boxItemSheet(b.dataset.id);
   });
   wireSteppers(s, (key, v) => (n = v), () => n);
-  photoField($("#nbi-photo", s), () => photo, p => { photo = p; }, () => nameEl.value.trim());
+  photoField($("#nbi-photo", s), () => photos, p => { photos = p; }, () => nameEl.value.trim());
   const save = () => {
     const nm = nameEl.value.trim();
     if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
-    const id = store.put({ kind: "boxitem", name: nm, box: boxEl.value, n, photo });
-    if (!boxItemById(id)) state.boxItems.push({ id, kind: "boxitem", name: nm, box: boxEl.value, n, eans: [], photo });
+    const person = $("#nbi-person", s).value.trim();
+    const id = store.put({ kind: "boxitem", name: nm, box: boxEl.value, n, photos, person });
+    if (!boxItemById(id)) state.boxItems.push({ id, kind: "boxitem", name: nm, box: boxEl.value, n, eans: [], photos, person });
     closeSheet();
     toast(`${nm} eingetragen`);
     openBox(boxEl.value);
@@ -980,6 +1016,8 @@ function boxItemSheet(id) {
     <div id="bi-photo"></div>
     <div class="locline"><span class="locname">Anzahl</span>${stepperHtml("bi-n", it.n)}</div>
     <div class="field"><label for="bi-name">Name</label><input class="text" id="bi-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
+    <div class="field"><label for="bi-person">Person <span class="opt">(wenn wichtig)</span></label>
+      <input class="text" id="bi-person" value="${esc(it.person)}" placeholder="z. B. für wen das Geschenk ist" autocomplete="off" enterkeyhint="done"></div>
     <div class="field"><label for="bi-box">In Kiste</label>${boxSelectHtml("bi-box", it.box)}</div>
     <button class="btn primary" id="bi-done">Fertig</button>
     <button class="linkbtn danger" id="bi-del">Artikel löschen</button>`);
@@ -989,10 +1027,16 @@ function boxItemSheet(id) {
     if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; $("#bi-title", s).textContent = v; renderList(); }
   };
   nameEl.addEventListener("change", saveName);
-  photoField($("#bi-photo", s), () => boxItemById(id)?.photo, p => {
+  const personEl = $("#bi-person", s);
+  const savePerson = () => {
+    const v = personEl.value.trim(), cur = boxItemById(id);
+    if (cur && v !== cur.person) { store.update(id, { person: v }); cur.person = v; renderList(); }
+  };
+  personEl.addEventListener("change", savePerson);
+  photoField($("#bi-photo", s), () => boxItemById(id)?.photos || [], p => {
     const cur = boxItemById(id); if (!cur) return;
-    cur.photo = p; store.update(id, { photo: p }); renderList();
-  }, () => boxItemById(id)?.name, true);
+    cur.photos = p; store.update(id, { photos: p, photo: null }); renderList();
+  }, () => boxItemById(id)?.name);
   wireSteppers(s, (key, v) => { const cur = boxItemById(id); if (cur) { bumpBoxItem(cur, v - cur.n); renderList(); } return v; },
     () => boxItemById(id)?.n ?? 0);
   $("#bi-box", s).addEventListener("change", e => {
@@ -1001,7 +1045,7 @@ function boxItemSheet(id) {
     toast(`${cur.name} liegt jetzt in ${boxById(cur.box)?.name || "der Kiste"}`);
     renderList();
   });
-  $("#bi-done", s).onclick = () => { saveName(); closeSheet(); };
+  $("#bi-done", s).onclick = () => { saveName(); savePerson(); closeSheet(); };
   $("#bi-del", s).onclick = () => {
     const cur = boxItemById(id);
     const c = openSheet(`<h2>${esc(cur.name)} löschen?</h2>
