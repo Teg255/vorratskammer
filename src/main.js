@@ -1304,7 +1304,25 @@ store.onAuth(user => {
 });
 
 if ("serviceWorker" in navigator && !demo && location.protocol === "https:") {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  // A new version is picked up whenever the app comes back to the screen, and loaded right away
+  // unless a form or the scanner is open (then the next time the app comes back).
+  const hadController = !!navigator.serviceWorker.controller;
+  let updateReady = false;
+  const reloadIfIdle = () => {
+    if (updateReady && !$("#sheet")?.innerHTML && !scanner && !document.activeElement?.matches?.("input, textarea, select")) location.reload();
+  };
+  navigator.serviceWorker.register("sw.js").then(reg => {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      reloadIfIdle();
+      reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || updateReady) return;
+    updateReady = true;
+    reloadIfIdle();
+  });
 }
 
 document.body.insertAdjacentHTML("beforeend", `<div id="sheet"></div><div id="lightbox"></div><div id="toast"></div>`);
