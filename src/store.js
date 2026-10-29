@@ -4,6 +4,8 @@
 //   update(id, patch)
 //   bump(id, loc, delta)   atomic +/- on a location count
 //   remove(id)
+//   put(data)       -> id, a box or a box item (no stock per place)
+//   count(id, delta)  atomic +/- on a box item
 // FirebaseStore keeps the shared stock in Firestore (works offline, syncs later).
 // LocalStore is the demo mode used when no Firebase config is set.
 
@@ -18,10 +20,17 @@ import {
 } from "firebase/firestore";
 
 export const LOCS = ["keller", "aussen"];
+// Everything lives in the `items` collection (so the access rules stay the same):
+// "item" = pantry article (Keller/Außenlager), "box" = a Kiste, "boxitem" = an article in a Kiste.
+const KINDS = ["item", "box", "boxitem"];
 
 function normalize(id, d) {
+  const kind = KINDS.includes(d.kind) ? d.kind : "item";
+  if (kind !== "item") {
+    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [] };
+  }
   return {
-    id,
+    id, kind,
     name: String(d.name || "Ohne Namen"),
     eans: Array.isArray(d.eans) ? d.eans : [],
     keller: Math.max(0, Number(d.keller) || 0),
@@ -87,6 +96,14 @@ export class FirebaseStore {
     updateDoc(doc(this.col, id), { [loc]: increment(delta), locs: arrayUnion(loc), updatedAt: serverTimestamp() }).catch(reportWriteError);
   }
   remove(id) { deleteDoc(doc(this.col, id)).catch(reportWriteError); }
+  put(data) {
+    const ref = doc(this.col);
+    setDoc(ref, { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }).catch(reportWriteError);
+    return ref.id;
+  }
+  count(id, delta) {
+    updateDoc(doc(this.col, id), { n: increment(delta), updatedAt: serverTimestamp() }).catch(reportWriteError);
+  }
   // Opened bottles marked "voll" become unopened ones. A transaction, so two phones can't both do it.
   settleFull(id) {
     const ref = doc(this.col, id);
@@ -144,6 +161,10 @@ export class LocalStore {
     ex.forEach(([name, keller, aussen, cat, pack, opened], i) => this.items.set("demo" + i, normalize("demo" + i, {
       name, eans: name.startsWith("Abenstaler") ? ["4020655033006"] : [], keller, aussen, locs: initialLocs({ keller, aussen }), cat, pack, opened,
     })));
+    this.items.set("demob1", normalize("demob1", { kind: "box", name: "Weihnachtsdeko" }));
+    this.items.set("demob2", normalize("demob2", { kind: "box", name: "Werkzeug" }));
+    [["Lichterkette", 3, "demob1"], ["Christbaumkugeln rot", 24, "demob1"], ["Akkuschrauber", 1, "demob2"], ["Schrauben 4×40", 0, "demob2"]]
+      .forEach(([name, n, box], i) => this.items.set("demobi" + i, normalize("demobi" + i, { kind: "boxitem", name, n, box })));
   }
   onAuth(cb) { setTimeout(() => cb({ email: "demo" }), 0); return () => {}; }
   signOut() {}
@@ -165,6 +186,11 @@ export class LocalStore {
     this.emit();
   }
   remove(id) { this.items.delete(id); this.emit(); }
+  put(data) {
+    const id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    this.items.set(id, normalize(id, data)); this.emit(); return id;
+  }
+  count(id, delta) { const it = this.items.get(id); if (!it) return; it.n = Math.max(0, it.n + delta); this.emit(); }
   async settleFull(id) {
     const it = this.items.get(id); const patch = it && fullToClosed(it);
     if (patch) { delete patch.open; Object.assign(it, patch); this.emit(); }

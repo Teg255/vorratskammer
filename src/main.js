@@ -13,6 +13,9 @@ const store = demo ? new LocalStore() : new FirebaseStore(cfg.firebase);
 const ui = loadUi();
 const state = {
   items: [],
+  boxes: [],     // Kisten
+  boxItems: [],  // articles in Kisten: just a name and a number
+  box: null,     // the Kiste opened in the Kisten tab
   loaded: false,
   pending: false,
   online: navigator.onLine,
@@ -39,6 +42,10 @@ const byId = id => state.items.find(it => it.id === id);
 const byEan = ean => state.items.find(it => it.eans.includes(ean));
 const isPieces = it => it.pack.mode === "pieces" && it.pack.size > 1;
 const isFill = it => it.pack.mode === "fill";
+const boxById = id => state.boxes.find(b => b.id === id);
+const boxItemById = id => state.boxItems.find(it => it.id === id);
+const itemsIn = boxId => state.boxItems.filter(it => it.box === boxId);
+const byName = (a, b) => a.name.localeCompare(b.name, "de");
 
 function loadUi() { try { return JSON.parse(localStorage.getItem("vk-ui") || "{}"); } catch { return {}; } }
 function saveUi() {
@@ -46,10 +53,10 @@ function saveUi() {
 }
 
 // Items whose names share most words with `name`: used to stop duplicates.
-function similar(name, exceptId) {
+function similar(name, exceptId, pool = state.items) {
   const a = new Set(words(name));
   if (!a.size) return [];
-  return state.items
+  return pool
     .filter(it => it.id !== exceptId)
     .map(it => {
       const b = new Set(words(it.name));
@@ -165,6 +172,12 @@ function takePiece(it, loc) {
   }
   setLeft(it, i, it.opened[i].left - 1);
   return true;
+}
+function bumpBoxItem(it, d) {
+  if (d < 0 && it.n + d < 0) d = -it.n;
+  if (!d) return;
+  store.count(it.id, d);
+  it.n += d;
 }
 const snapshot = it => ({ keller: it.keller, aussen: it.aussen, opened: it.opened.map(o => ({ ...o })) });
 function restore(it, snap) {
@@ -509,7 +522,8 @@ function renderShell() {
         <div class="tabs" role="group" aria-label="Lagerort">
           <button data-view="alle">Alle<span class="n" id="n-alle"></span></button>
           <button data-view="keller">Keller<span class="n" id="n-keller"></span></button>
-          <button data-view="aussen">Außenlager<span class="n" id="n-aussen"></span></button>
+          <button data-view="aussen">Außen<span class="long">lager</span><span class="n" id="n-aussen"></span></button>
+          <button data-view="kisten">Kisten<span class="n" id="n-kisten"></span></button>
         </div>
         <div class="viewopts">
           <button class="toggle" id="fill"><span class="sw" aria-hidden="true"></span>Füllstandsanzeige</button>
@@ -530,10 +544,11 @@ function renderShell() {
   $("#qclear").onclick = () => { state.query = ""; $("#q").value = ""; renderList(); $("#q").focus(); };
   document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => {
     state.view = b.dataset.view;
-    if (state.view !== "alle") { state.scanLoc = state.view; saveUi(); }
+    state.box = null;
+    if (LOCS.includes(state.view)) { state.scanLoc = state.view; saveUi(); }
     renderList(); window.scrollTo({ top: 0 });
   });
-  $("#add").onclick = () => newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
+  $("#add").onclick = () => addHere(state.query);
   $("#scan").onclick = () => { unlockAudio(); openScanner(); };
   $("#status").onclick = statusSheet;
   $("#hide").onclick = () => { state.hideEmpty = !state.hideEmpty; saveUi(); renderList(); };
@@ -546,6 +561,20 @@ function renderShell() {
       const c = head.dataset.cat;
       state.collapsed.has(c) ? state.collapsed.delete(c) : state.collapsed.add(c);
       saveUi(); renderList();
+      return;
+    }
+    if (e.target.closest("[data-back]")) { state.box = null; renderList(); window.scrollTo({ top: 0 }); return; }
+    if (e.target.closest("[data-boxedit]")) { boxSheet(state.box); return; }
+    const boxRow = e.target.closest("[data-box]");
+    if (boxRow) { openBox(boxRow.dataset.box); return; }
+    const brow = e.target.closest("[data-bid]");
+    if (brow) {
+      const it = boxItemById(brow.dataset.bid); if (!it) return;
+      const b = e.target.closest("[data-d]");
+      if (b) { bumpBoxItem(it, Number(b.dataset.d)); renderList(); return; }
+      if (!e.target.closest(".txt")) return;
+      if (state.view === "kisten" && state.box) boxItemSheet(it.id);
+      else openBox(it.box);
       return;
     }
     const row = e.target.closest("[data-id]"); if (!row) return;
@@ -561,13 +590,17 @@ function renderShell() {
   list.addEventListener("focusin", e => { if (e.target.matches(".stepper input")) e.target.select(); });
   list.addEventListener("change", e => {
     if (!e.target.matches(".stepper input")) return;
+    const n0 = Math.max(0, Math.min(999, parseInt(e.target.value) || 0));
+    const brow = e.target.closest("[data-bid]");
+    if (brow) { const it = boxItemById(brow.dataset.bid); if (it) bumpBoxItem(it, n0 - it.n); renderList(); return; }
     const id = e.target.closest("[data-id]").dataset.id;
     const n = Math.max(0, Math.min(999, parseInt(e.target.value) || 0));
     const it = byId(id);
     bump(it, state.view, n - units(it, state.view)); renderList();
   });
   $("#empty").addEventListener("click", e => {
-    if (e.target.closest("#add-q")) newItemSheet({ name: state.query, loc: state.view !== "alle" ? state.view : state.scanLoc });
+    if (e.target.closest("#add-q")) addHere(state.query);
+    if (e.target.closest("#add-box")) newBoxSheet();
   });
   window.addEventListener("online", () => { state.online = true; renderStatus(); });
   window.addEventListener("offline", () => { state.online = false; renderStatus(); });
@@ -628,11 +661,16 @@ function rowHtml(it) {
 
 function renderList() {
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
-  $("#n-alle").textContent = state.items.filter(it => inStock(it)).length || "";
+  const boxHave = state.boxItems.filter(it => it.n > 0).length;
+  $("#n-alle").textContent = (state.items.filter(it => inStock(it)).length + boxHave) || "";
   for (const l of LOCS) $("#n-" + l).textContent = state.items.filter(it => inStock(it, l)).length || "";
+  $("#n-kisten").textContent = boxHave || "";
   $("#qclear").hidden = !state.query;
   $("#hide").setAttribute("aria-pressed", state.hideEmpty);
   $("#fill").setAttribute("aria-pressed", state.showFill);
+  $("#fill").hidden = state.view === "kisten";
+  $("#add").textContent = state.view === "kisten" && !state.box ? "＋ Kiste" : "＋ Neu";
+  if (state.view === "kisten") return renderKisten();
 
   const { list, hidden } = visibleItems();
   // Group by Rubrik: Ohne Rubrik first (so it gets sorted), then Food, then Non-Food.
@@ -657,22 +695,237 @@ function renderList() {
     if (!cats.length) continue;
     html += `<li class="grouphead">${g.name}</li>` + cats.map(c => section(c.id, c.name)).join("");
   }
+  // "Alle" also shows what is in the Kisten, so a search finds it there too.
+  const inBoxes = state.view === "alle" ? visibleBoxItems(state.boxItems) : [];
+  if (inBoxes.length) {
+    const closed = !searching && state.collapsed.has("kisten");
+    html += `<li class="grouphead">Kisten</li><li class="cathead"><button data-cat="kisten" aria-expanded="${!closed}">
+        <span>In Kisten</span><span class="cnt">${inBoxes.filter(it => it.n > 0).length || ""}</span><span class="chev" aria-hidden="true">›</span></button></li>
+      ${closed ? "" : inBoxes.map(it => boxItemRowHtml(it, true)).join("")}`;
+  }
   $("#list").innerHTML = html;
+  const shown = list.length + inBoxes.length;
 
   let empty = "";
   if (state.loadError) empty = `<div class="empty"><strong>Da stimmt etwas nicht.</strong><span>${esc(state.loadError)}</span></div>`;
   else if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
-  else if (!list.length && state.query) {
+  else if (!shown && state.query) {
     empty = `<div class="empty"><strong>„${esc(state.query)}“ haben wir ${state.view === "alle" ? "nicht" : "nicht im " + LOC_NAME[state.view]}.</strong>
       <span>Also ab auf die Einkaufsliste. Oder doch da? Dann leg es an.</span>
       <button class="btn ghost small" id="add-q">„${esc(state.query)}“ anlegen</button></div>`;
-  } else if (!list.length && hidden) {
+  } else if (!shown && hidden) {
     empty = `<div class="empty"><strong>${state.view === "alle" ? "Gerade ist nichts da." : "Im " + LOC_NAME[state.view] + " ist gerade nichts."}</strong><span>Leere Artikel sind ausgeblendet.</span></div>`;
-  } else if (!list.length) {
+  } else if (!shown) {
     empty = `<div class="empty"><strong>${state.view === "alle" ? "Noch nichts erfasst." : "Im " + LOC_NAME[state.view] + " ist noch nichts erfasst."}</strong>
       <span>Tippe auf „Scannen“ und halte die Kamera auf einen Barcode. Oder lege einen Artikel mit „Neu“ von Hand an.</span></div>`;
   }
   $("#empty").innerHTML = empty;
+}
+
+// ---------- Kisten ----------
+// Kisten are boxes you name yourself. What is in them is just counted, no packs or fill levels.
+function addHere(name = "") {
+  if (state.view === "kisten") return state.box ? newBoxItemSheet({ name, box: state.box }) : newBoxSheet();
+  newItemSheet({ name, loc: state.view !== "alle" ? state.view : state.scanLoc });
+}
+function openBox(id) {
+  if (!boxById(id)) return;
+  state.view = "kisten"; state.box = id; state.query = "";
+  const q = $("#q"); if (q) q.value = "";
+  renderList(); window.scrollTo({ top: 0 });
+}
+
+// Search and "Leere ausblenden" for articles in Kisten. A search also matches the Kiste's name.
+function visibleBoxItems(pool) {
+  const q = norm(state.query).trim();
+  let list = pool;
+  if (q) {
+    const qs = q.split(/\s+/);
+    list = list.filter(it => { const n = norm(it.name + " " + (boxById(it.box)?.name || "")); return qs.every(w => n.includes(w)); });
+  } else if (state.hideEmpty) list = list.filter(it => it.n > 0);
+  return [...list].sort((a, b) => (b.n > 0) - (a.n > 0) || byName(a, b));
+}
+
+// `overview`: shown outside its Kiste, so with the Kiste's name and without + and −.
+function boxItemRowHtml(it, overview) {
+  const cls = it.n > 0 ? "item" : "item none";
+  if (overview) {
+    const b = boxById(it.box);
+    return `<li class="${cls}" data-bid="${it.id}">
+      <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub"><span class="where kiste"><i></i>Kiste ${esc(b?.name || "?")}</span></span></button>
+      <div class="total ${it.n ? "" : "out"}">${it.n || "leer"}</div></li>`;
+  }
+  return `<li class="${cls}" data-bid="${it.id}">
+    <button class="txt"><span class="name">${esc(it.name)}</span></button>
+    ${stepperHtml("", it.n)}</li>`;
+}
+
+function renderKisten() {
+  if (state.box && !boxById(state.box)) state.box = null;
+  const box = state.box && boxById(state.box);
+  const searching = !!state.query.trim();
+  let html = "", empty = "";
+  if (searching) {
+    // Search across all Kisten.
+    const rows = visibleBoxItems(state.boxItems);
+    html = rows.map(it => boxItemRowHtml(it, true)).join("");
+    if (!rows.length) empty = `<div class="empty"><strong>„${esc(state.query)}“ ist in keiner Kiste.</strong>
+      ${box ? `<button class="btn ghost small" id="add-q">„${esc(state.query)}“ in ${esc(box.name)} anlegen</button>` : ""}</div>`;
+  } else if (box) {
+    const all = itemsIn(box.id), rows = visibleBoxItems(all);
+    html = `<li class="boxhead"><button class="back" data-back>‹ Alle Kisten</button>
+        <div class="boxtitle"><h2>${esc(box.name)}</h2><button class="linkbtn" data-boxedit>Umbenennen</button></div></li>`
+      + rows.map(it => boxItemRowHtml(it, false)).join("");
+    if (!all.length) empty = `<div class="empty"><strong>Die Kiste ist noch leer.</strong><span>Tippe auf „Neu“, um einzutragen, was drin ist.</span></div>`;
+    else if (!rows.length) empty = `<div class="empty"><strong>In dieser Kiste ist gerade nichts.</strong><span>Leere Artikel sind ausgeblendet.</span></div>`;
+  } else {
+    html = [...state.boxes].sort(byName).map(b => {
+      const its = itemsIn(b.id), have = its.filter(it => it.n > 0).length;
+      return `<li class="item boxrow" data-box="${b.id}">
+        <button class="txt"><span class="name">${esc(b.name)}</span>
+          <span class="sub">${its.length ? `${have} von ${its.length} Artikeln da` : "noch leer"}</span></button>
+        <span class="chev" aria-hidden="true">›</span></li>`;
+    }).join("");
+    if (!state.loaded) empty = `<div class="empty"><span class="spinner"></span><span>Lade euren Vorrat …</span></div>`;
+    else if (!state.boxes.length) empty = `<div class="empty"><strong>Noch keine Kisten.</strong>
+      <span>Leg eine Kiste an, z. B. „Weihnachtsdeko“ oder „Werkzeug“, und trag dann ein, was drin ist.</span>
+      <button class="btn ghost small" id="add-box">＋ Kiste anlegen</button></div>`;
+  }
+  $("#list").innerHTML = html;
+  $("#empty").innerHTML = empty;
+}
+
+function newBoxSheet() {
+  const s = openSheet(`<h2>Neue Kiste</h2>
+    <div class="field"><label for="nb-name">Name der Kiste</label>
+      <input class="text" id="nb-name" placeholder="z. B. Weihnachtsdeko" autocomplete="off" enterkeyhint="done"></div>
+    <div class="btnrow"><button class="btn ghost" id="nb-cancel">Abbrechen</button><button class="btn primary" id="nb-save">Anlegen</button></div>`);
+  const nameEl = $("#nb-name", s);
+  const save = () => {
+    const nm = nameEl.value.trim();
+    if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
+    const id = store.put({ kind: "box", name: nm });
+    // show it right away, before the database answers
+    if (!boxById(id)) state.boxes.push({ id, kind: "box", name: nm, box: null, n: 0, eans: [] });
+    closeSheet();
+    toast(`Kiste ${nm} angelegt`);
+    openBox(id);
+  };
+  $("#nb-cancel", s).onclick = closeSheet;
+  $("#nb-save", s).onclick = save;
+  nameEl.addEventListener("keydown", e => { if (e.key === "Enter") save(); });
+  setTimeout(() => nameEl.focus(), 60);
+}
+
+// Rename or delete a Kiste.
+function boxSheet(id) {
+  const b = boxById(id); if (!b) return;
+  const n = itemsIn(id).length;
+  const s = openSheet(`<h2>Kiste ${esc(b.name)}</h2>
+    <div class="field"><label for="bx-name">Name der Kiste</label>
+      <input class="text" id="bx-name" value="${esc(b.name)}" autocomplete="off" enterkeyhint="done"></div>
+    <button class="btn primary" id="bx-done">Fertig</button>
+    <button class="linkbtn danger" id="bx-del">Kiste löschen</button>`);
+  const nameEl = $("#bx-name", s);
+  const saveName = () => {
+    const v = nameEl.value.trim(), cur = boxById(id);
+    if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; renderList(); }
+  };
+  nameEl.addEventListener("keydown", e => { if (e.key === "Enter") { saveName(); closeSheet(); } });
+  $("#bx-done", s).onclick = () => { saveName(); closeSheet(); };
+  $("#bx-del", s).onclick = () => {
+    const c = openSheet(`<h2>Kiste ${esc(b.name)} löschen?</h2>
+      <div class="hint">${n ? `Die ${n === 1 ? "ein Artikel" : n + " Artikel"} darin ${n === 1 ? "wird" : "werden"} mitgelöscht, auf beiden Handys.` : "Die Kiste ist leer."}</div>
+      <div class="btnrow"><button class="btn ghost" id="d-no">Behalten</button><button class="btn danger" id="d-yes">Löschen</button></div>`);
+    $("#d-no", c).onclick = () => boxSheet(id);
+    $("#d-yes", c).onclick = () => {
+      for (const it of itemsIn(id)) store.remove(it.id);
+      store.remove(id);
+      state.boxItems = state.boxItems.filter(it => it.box !== id);
+      state.boxes = state.boxes.filter(x => x.id !== id);
+      state.box = null;
+      closeSheet(); renderList();
+      toast(`Kiste ${b.name} gelöscht`);
+    };
+  };
+}
+
+function boxSelectHtml(id, selected) {
+  return `<select class="text select" id="${id}">${[...state.boxes].sort(byName).map(b =>
+    `<option value="${b.id}" ${b.id === selected ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>`;
+}
+
+function newBoxItemSheet({ name = "", box }) {
+  let n = 1;
+  const s = openSheet(`<h2>In die Kiste</h2>
+    <div class="field"><label for="nbi-name">Was ist drin?</label>
+      <input class="text" id="nbi-name" value="${esc(name)}" placeholder="z. B. Lichterkette" autocomplete="off" enterkeyhint="done"></div>
+    <div class="suggest" id="nbi-sim"></div>
+    <div class="field"><label for="nbi-box">Kiste</label>${boxSelectHtml("nbi-box", box)}</div>
+    <div class="locline"><span class="locname">Wie viele?</span>${stepperHtml("nbi-n", n)}</div>
+    <div class="btnrow"><button class="btn ghost" id="nbi-cancel">Abbrechen</button><button class="btn primary" id="nbi-save">Speichern</button></div>`);
+  const nameEl = $("#nbi-name", s), boxEl = $("#nbi-box", s);
+  const showSimilar = () => {
+    const sim = similar(nameEl.value, null, itemsIn(boxEl.value));
+    $("#nbi-sim", s).innerHTML = sim.length ? `<span class="label">Schon in der Kiste?</span>` + sim.map(it =>
+      `<button type="button" data-id="${it.id}"><span>${esc(it.name)}</span><span>Öffnen</span></button>`).join("") : "";
+  };
+  nameEl.addEventListener("input", showSimilar);
+  boxEl.addEventListener("change", showSimilar);
+  showSimilar();
+  $("#nbi-sim", s).addEventListener("click", e => {
+    const b = e.target.closest("[data-id]"); if (b) boxItemSheet(b.dataset.id);
+  });
+  wireSteppers(s, (key, v) => (n = v), () => n);
+  const save = () => {
+    const nm = nameEl.value.trim();
+    if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
+    const id = store.put({ kind: "boxitem", name: nm, box: boxEl.value, n });
+    if (!boxItemById(id)) state.boxItems.push({ id, kind: "boxitem", name: nm, box: boxEl.value, n, eans: [] });
+    closeSheet();
+    toast(`${nm} eingetragen`);
+    openBox(boxEl.value);
+  };
+  $("#nbi-cancel", s).onclick = closeSheet;
+  $("#nbi-save", s).onclick = save;
+  nameEl.addEventListener("keydown", e => { if (e.key === "Enter") nameEl.blur(); });
+  setTimeout(() => nameEl.focus(), 60);
+}
+
+// One article in a Kiste: number, name, which Kiste, delete.
+function boxItemSheet(id) {
+  const it = boxItemById(id); if (!it) return;
+  const s = openSheet(`<h2 id="bi-title">${esc(it.name)}</h2>
+    <div class="locline"><span class="locname">Anzahl</span>${stepperHtml("bi-n", it.n)}</div>
+    <div class="field"><label for="bi-name">Name</label><input class="text" id="bi-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
+    <div class="field"><label for="bi-box">In Kiste</label>${boxSelectHtml("bi-box", it.box)}</div>
+    <button class="btn primary" id="bi-done">Fertig</button>
+    <button class="linkbtn danger" id="bi-del">Artikel löschen</button>`);
+  const nameEl = $("#bi-name", s);
+  const saveName = () => {
+    const v = nameEl.value.trim(), cur = boxItemById(id);
+    if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; $("#bi-title", s).textContent = v; renderList(); }
+  };
+  nameEl.addEventListener("change", saveName);
+  wireSteppers(s, (key, v) => { const cur = boxItemById(id); if (cur) { bumpBoxItem(cur, v - cur.n); renderList(); } return v; },
+    () => boxItemById(id)?.n ?? 0);
+  $("#bi-box", s).addEventListener("change", e => {
+    const cur = boxItemById(id); if (!cur) return;
+    cur.box = e.target.value; store.update(id, { box: cur.box });
+    toast(`${cur.name} liegt jetzt in ${boxById(cur.box)?.name || "der Kiste"}`);
+    renderList();
+  });
+  $("#bi-done", s).onclick = () => { saveName(); closeSheet(); };
+  $("#bi-del", s).onclick = () => {
+    const cur = boxItemById(id);
+    const c = openSheet(`<h2>${esc(cur.name)} löschen?</h2>
+      <div class="btnrow"><button class="btn ghost" id="d-no">Behalten</button><button class="btn danger" id="d-yes">Löschen</button></div>`);
+    $("#d-no", c).onclick = () => boxItemSheet(id);
+    $("#d-yes", c).onclick = () => {
+      store.remove(id); state.boxItems = state.boxItems.filter(x => x.id !== id);
+      closeSheet(); renderList(); toast(`${cur.name} gelöscht`);
+    };
+  };
 }
 
 // ---------- scanner ----------
@@ -948,8 +1201,11 @@ function startMain() {
       return;
     }
     state.loadError = null;
-    state.items = items; state.loaded = true; state.pending = !!meta.pending;
-    settleFull(items);
+    state.items = items.filter(it => it.kind === "item");
+    state.boxes = items.filter(it => it.kind === "box");
+    state.boxItems = items.filter(it => it.kind === "boxitem");
+    state.loaded = true; state.pending = !!meta.pending;
+    settleFull(state.items);
     renderStatus();
     // Don't redraw the list under a finger that is typing a number.
     if (!document.activeElement?.matches?.("#list input")) renderList();
