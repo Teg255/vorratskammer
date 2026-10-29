@@ -5,7 +5,7 @@ const SHELL = ["./", "index.html", "config.js", "assets/app.js", "assets/zxing_r
   "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
@@ -14,8 +14,10 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
+  // Skip the browser's own cache (GitHub Pages keeps files for 10 minutes), so an update shows up at once.
+  const fresh = e.request.mode === "navigate" ? new Request(e.request.url, { cache: "no-cache" }) : new Request(e.request, { cache: "no-cache" });
   e.respondWith(
-    fetch(e.request).then(res => {
+    fetch(fresh).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(e.request, copy));
       return res;
