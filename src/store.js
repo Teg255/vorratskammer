@@ -27,7 +27,9 @@ const KINDS = ["item", "box", "boxitem"];
 function normalize(id, d) {
   const kind = KINDS.includes(d.kind) ? d.kind : "item";
   if (kind !== "item") {
-    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [] };
+    // photo: a small JPEG as data URL, so no extra storage service is needed
+    const photo = typeof d.photo === "string" && d.photo.startsWith("data:image/") ? d.photo : null;
+    return { id, kind, name: String(d.name || "Ohne Namen"), box: d.box || null, n: Math.max(0, Number(d.n) || 0), eans: [], photo };
   }
   return {
     id, kind,

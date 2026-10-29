@@ -567,6 +567,8 @@ function renderShell() {
     if (e.target.closest("[data-boxedit]")) { boxSheet(state.box); return; }
     const boxRow = e.target.closest("[data-box]");
     if (boxRow) { openBox(boxRow.dataset.box); return; }
+    const ph = e.target.closest("[data-photo]");
+    if (ph) { const it = boxItemById(ph.dataset.photo); if (it?.photo) showPhoto(it.photo, it.name); return; }
     const brow = e.target.closest("[data-bid]");
     if (brow) {
       const it = boxItemById(brow.dataset.bid); if (!it) return;
@@ -747,15 +749,18 @@ function visibleBoxItems(pool) {
 }
 
 // `overview`: shown outside its Kiste, so with the Kiste's name and without + and −.
+function thumbHtml(it) {
+  return it.photo ? `<button type="button" class="thumb" data-photo="${it.id}" aria-label="Foto ansehen"><img src="${it.photo}" alt=""></button>` : "";
+}
 function boxItemRowHtml(it, overview) {
-  const cls = it.n > 0 ? "item" : "item none";
+  const cls = (it.n > 0 ? "item" : "item none") + (it.photo ? " withphoto" : "");
   if (overview) {
     const b = boxById(it.box);
-    return `<li class="${cls}" data-bid="${it.id}">
+    return `<li class="${cls}" data-bid="${it.id}">${thumbHtml(it)}
       <button class="txt"><span class="name">${esc(it.name)}</span><span class="sub"><span class="where kiste"><i></i>Kiste ${esc(b?.name || "?")}</span></span></button>
       <div class="total ${it.n ? "" : "out"}">${it.n || "leer"}</div></li>`;
   }
-  return `<li class="${cls}" data-bid="${it.id}">
+  return `<li class="${cls}" data-bid="${it.id}">${thumbHtml(it)}
     <button class="txt"><span class="name">${esc(it.name)}</span></button>
     ${stepperHtml("", it.n)}</li>`;
 }
@@ -855,14 +860,89 @@ function boxSelectHtml(id, selected) {
     `<option value="${b.id}" ${b.id === selected ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>`;
 }
 
+// ---------- photos ----------
+// A photo is shrunk to a small JPEG (about 30 to 80 KB) and kept right in the article,
+// so it syncs to both phones without any extra setup.
+const PHOTO_MAX = 800;
+async function shrinkPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = fail; i.src = url; });
+    let side = PHOTO_MAX, q = 0.7, out = "";
+    for (let tries = 0; tries < 4; tries++) {
+      const k = Math.min(1, side / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      out = c.toDataURL("image/jpeg", q);
+      if (out.length < 250000) break;
+      side *= 0.75; q -= 0.1;
+    }
+    return out;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+// Photo picker inside a sheet. On the iPhone the file field offers "Foto aufnehmen" and the library.
+// `big`: the item's own sheet, with a larger picture.
+function photoField(host, get, set, title, big = false) {
+  const paint = () => {
+    const p = get();
+    host.innerHTML = p
+      ? `<div class="photofield ${big ? "big" : ""}"><button type="button" class="photo" data-act="view" aria-label="Foto vergrößern"><img src="${p}" alt=""></button>
+          <div class="photoacts"><label class="linkbtn">Anderes Foto<input type="file" accept="image/*" hidden></label>
+          <button type="button" class="linkbtn danger" data-act="del">Foto entfernen</button></div></div>`
+      : `<label class="btn ghost small photoadd"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+          Foto machen oder auswählen<input type="file" accept="image/*" hidden></label>`;
+  };
+  host.addEventListener("change", async e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    host.innerHTML = `<div class="hint"><span class="spinner"></span>&nbsp; Foto wird vorbereitet …</div>`;
+    try { set(await shrinkPhoto(f)); }
+    catch (err) { console.error(err); toast("Das Foto ließ sich nicht öffnen. Bitte ein anderes versuchen."); }
+    paint();
+  });
+  host.addEventListener("click", e => {
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    if (b.dataset.act === "view") showPhoto(get(), title());
+    if (b.dataset.act === "del") { set(null); paint(); }
+  });
+  paint();
+}
+
+// Full-screen photo. Tap to zoom in, drag to look around, ✕ or tap again to zoom out.
+function showPhoto(src, name) {
+  if (!src) return;
+  const host = $("#lightbox");
+  host.innerHTML = `<div class="lightbox" role="dialog" aria-label="Foto">
+    <div class="lbtop"><span>${esc(name || "")}</span><button type="button" class="close" aria-label="Schließen">✕</button></div>
+    <div class="lbimg"><img src="${src}" alt="${esc(name || "Foto")}"></div>
+    <div class="lbhint">Antippen zum Vergrößern</div></div>`;
+  const box = $(".lbimg", host), img = $("img", box);
+  $(".close", host).onclick = () => (host.innerHTML = "");
+  img.onclick = e => {
+    const zoomed = box.classList.toggle("zoom");
+    $(".lbhint", host).textContent = zoomed ? "Ziehen zum Verschieben, antippen zum Verkleinern" : "Antippen zum Vergrößern";
+    if (zoomed) {
+      // keep the tapped spot under the finger
+      const r = img.getBoundingClientRect();
+      const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+      requestAnimationFrame(() => {
+        box.scrollLeft = fx * box.scrollWidth - box.clientWidth / 2;
+        box.scrollTop = fy * box.scrollHeight - box.clientHeight / 2;
+      });
+    }
+  };
+}
+
 function newBoxItemSheet({ name = "", box }) {
-  let n = 1;
+  let n = 1, photo = null;
   const s = openSheet(`<h2>In die Kiste</h2>
     <div class="field"><label for="nbi-name">Was ist drin?</label>
       <input class="text" id="nbi-name" value="${esc(name)}" placeholder="z. B. Lichterkette" autocomplete="off" enterkeyhint="done"></div>
     <div class="suggest" id="nbi-sim"></div>
     <div class="field"><label for="nbi-box">Kiste</label>${boxSelectHtml("nbi-box", box)}</div>
     <div class="locline"><span class="locname">Wie viele?</span>${stepperHtml("nbi-n", n)}</div>
+    <div class="field"><span class="label">Foto</span><div id="nbi-photo"></div></div>
     <div class="btnrow"><button class="btn ghost" id="nbi-cancel">Abbrechen</button><button class="btn primary" id="nbi-save">Speichern</button></div>`);
   const nameEl = $("#nbi-name", s), boxEl = $("#nbi-box", s);
   const showSimilar = () => {
@@ -877,11 +957,12 @@ function newBoxItemSheet({ name = "", box }) {
     const b = e.target.closest("[data-id]"); if (b) boxItemSheet(b.dataset.id);
   });
   wireSteppers(s, (key, v) => (n = v), () => n);
+  photoField($("#nbi-photo", s), () => photo, p => { photo = p; }, () => nameEl.value.trim());
   const save = () => {
     const nm = nameEl.value.trim();
     if (!nm) { nameEl.focus(); nameEl.placeholder = "Bitte einen Namen eintragen"; return; }
-    const id = store.put({ kind: "boxitem", name: nm, box: boxEl.value, n });
-    if (!boxItemById(id)) state.boxItems.push({ id, kind: "boxitem", name: nm, box: boxEl.value, n, eans: [] });
+    const id = store.put({ kind: "boxitem", name: nm, box: boxEl.value, n, photo });
+    if (!boxItemById(id)) state.boxItems.push({ id, kind: "boxitem", name: nm, box: boxEl.value, n, eans: [], photo });
     closeSheet();
     toast(`${nm} eingetragen`);
     openBox(boxEl.value);
@@ -896,6 +977,7 @@ function newBoxItemSheet({ name = "", box }) {
 function boxItemSheet(id) {
   const it = boxItemById(id); if (!it) return;
   const s = openSheet(`<h2 id="bi-title">${esc(it.name)}</h2>
+    <div id="bi-photo"></div>
     <div class="locline"><span class="locname">Anzahl</span>${stepperHtml("bi-n", it.n)}</div>
     <div class="field"><label for="bi-name">Name</label><input class="text" id="bi-name" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
     <div class="field"><label for="bi-box">In Kiste</label>${boxSelectHtml("bi-box", it.box)}</div>
@@ -907,6 +989,10 @@ function boxItemSheet(id) {
     if (v && cur && v !== cur.name) { store.update(id, { name: v }); cur.name = v; $("#bi-title", s).textContent = v; renderList(); }
   };
   nameEl.addEventListener("change", saveName);
+  photoField($("#bi-photo", s), () => boxItemById(id)?.photo, p => {
+    const cur = boxItemById(id); if (!cur) return;
+    cur.photo = p; store.update(id, { photo: p }); renderList();
+  }, () => boxItemById(id)?.name, true);
   wireSteppers(s, (key, v) => { const cur = boxItemById(id); if (cur) { bumpBoxItem(cur, v - cur.n); renderList(); } return v; },
     () => boxItemById(id)?.n ?? 0);
   $("#bi-box", s).addEventListener("change", e => {
@@ -1221,4 +1307,4 @@ if ("serviceWorker" in navigator && !demo && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
-document.body.insertAdjacentHTML("beforeend", `<div id="sheet"></div><div id="toast"></div>`);
+document.body.insertAdjacentHTML("beforeend", `<div id="sheet"></div><div id="lightbox"></div><div id="toast"></div>`);
